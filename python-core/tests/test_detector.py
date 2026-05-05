@@ -151,3 +151,59 @@ class TestOpenPositionLimit:
         is_valid, reason = feed_gap(detector, BASE_GAP)
         assert not is_valid
         assert "position" in reason.lower()
+
+
+def test_cross_platform_gap_uses_per_pair_fee_rate():
+    detector, db = make_detector({
+        "min_gap_cents": 5, "max_gap_cents": 30,
+        "ev_taker_fee_rate": 0.02,  # global default (should be overridden by gap["fee_rate"])
+        "ev_min_cents": 1.0, "ev_slippage_cents": 0.5,
+        "max_daily_loss_usdc": 50.0, "max_open_positions": 999_999,
+        "markets_json": "config/markets.json",
+    })
+    # 6¢ gap, cross_platform (min=5c) — combined = (1-0.71)+0.58 = 0.87 < 0.95
+    gap = {
+        "market_id": "test-fee-market",
+        "polymarket_price": 0.71,
+        "kalshi_price": 0.58,
+        "gap_cents": 6.0,
+        "confidence": "medium",
+        "pair_type": "cross_platform",
+        "polymarket_token": "tok123",
+        "kalshi_ticker": "TKR123",
+        "fee_rate": 0.04,
+    }
+    ok, reason = feed_gap(detector, gap, times=3)
+    assert ok, f"Expected valid: {reason}"
+
+
+def test_internal_gap_requires_higher_minimum():
+    detector, db = make_detector({
+        "ev_taker_fee_rate": 0.02,
+        "ev_min_cents": 1.0, "ev_slippage_cents": 0.5,
+        "max_daily_loss_usdc": 50.0, "max_open_positions": 999_999,
+        "markets_json": "config/markets.json",
+        "internal_min_gap_cents": 8.0,
+    })
+    # Seed outcome_count=2 in market_pairs so binary gate passes
+    import tracker
+    db.execute(
+        "INSERT OR IGNORE INTO market_pairs (token_a, token_b, outcome_count) VALUES (?,?,?)",
+        ("tokenA", "tokenB", 2)
+    )
+    db.commit()
+    # 6¢ gap on internal pair — should be rejected (internal min is 8¢)
+    gap = {
+        "market_id": "99::aaa-bbb",
+        "polymarket_price": 0.50,
+        "kalshi_price": 0.44,
+        "gap_cents": 6.0,
+        "confidence": "high",
+        "pair_type": "internal",
+        "polymarket_token": "tokenA",
+        "kalshi_ticker": "tokenB",
+        "fee_rate": 0.04,
+    }
+    ok, reason = feed_gap(detector, gap, times=3)
+    assert not ok
+    assert "8.0" in reason

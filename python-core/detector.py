@@ -85,8 +85,18 @@ class GapDetector:
         if combined >= 0.95:
             return False, f"Combined price {combined:.3f} >= 0.95 (no profit after fees)"
 
-        # Check 1b: EV net must exceed minimum threshold after fees + slippage
-        taker_fee_rate = self.config.get("ev_taker_fee_rate", 0.02)
+        # Check 1b: Per-pair-type minimum gap threshold
+        # Internal pairs have a higher bar (negRisk mechanics more complex)
+        if pair_type == "internal":
+            min_gap_for_type = self.config.get("internal_min_gap_cents", 8.0)
+        else:
+            min_gap_for_type = self.config.get("cross_platform_min_gap_cents", 5.0)
+        if gap_cents < min_gap_for_type:
+            return False, f"Gap {gap_cents:.1f}¢ below {pair_type} minimum {min_gap_for_type:.1f}¢"
+
+        # Check 1c: EV net must exceed minimum threshold after fees + slippage
+        # Use per-pair fee_rate from markets.json; fall back to 4% (conservative)
+        taker_fee_rate = gap.get("fee_rate", self.config.get("ev_taker_fee_rate", 0.04))
         slippage_cents = self.config.get("ev_slippage_cents", 0.5)
         ev_min_cents = self.config.get("ev_min_cents", 1.0)
         arb_ev = calculate_arb_ev(combined, taker_fee_rate, slippage_cents)
