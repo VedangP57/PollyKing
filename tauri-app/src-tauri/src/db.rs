@@ -35,7 +35,7 @@ pub struct Trade {
     pub dry_run: bool,
 }
 
-fn db_path() -> String {
+pub fn db_path() -> String {
     // Compile-time anchor: CARGO_MANIFEST_DIR = .../tauri-app/src-tauri
     // ../../data/trades.db = PolyyKing/data/trades.db (absolute, CWD-independent)
     let compile_time = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/trades.db");
@@ -296,4 +296,175 @@ fn count_pairs() -> i64 {
             80691
         }
     }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RiskState {
+    pub kill_switches: std::collections::HashMap<String, bool>,
+    pub daily_loss_usdc: f64,
+    pub open_positions: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CalibrationStats {
+    pub brier_score: Option<f64>,
+    pub ev_error: Option<f64>,
+    pub win_rate: Option<f64>,
+    pub trade_count: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CategoryBreakdown {
+    pub category: String,
+    pub pnl: f64,
+    pub trade_count: i64,
+    pub win_rate: f64,
+}
+
+pub fn get_risk_state(db: &str) -> Result<RiskState> {
+    let conn = Connection::open(db)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    conn.busy_timeout(std::time::Duration::from_millis(3000))?;
+
+    let mut kill_switches = std::collections::HashMap::new();
+    let switch_names = ["daily_drawdown", "api_health", "model_drift", "liquidity"];
+    for name in &switch_names {
+        let key = format!("ks_{}", name);
+        let val: String = conn
+            .query_row(
+                "SELECT value FROM bot_state WHERE key=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| "false".to_string());
+        kill_switches.insert(name.to_string(), val == "true");
+    }
+
+    let daily_loss: f64 = conn
+        .query_row(
+            "SELECT COALESCE(ABS(SUM(actual_profit)), 0.0) FROM trades \
+             WHERE opened_at > date('now') AND status IN ('loss') AND dry_run=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0.0);
+
+    let open_positions: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM trades WHERE status='open'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    Ok(RiskState { kill_switches, daily_loss_usdc: daily_loss, open_positions })
+}
+
+pub fn get_calibration_stats(db: &str) -> Result<CalibrationStats> {
+    let conn = Connection::open(db)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    conn.busy_timeout(std::time::Duration::from_millis(3000))?;
+
+    let trade_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM trades WHERE status IN ('profit','loss','resolved') AND dry_run=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if trade_count == 0 {
+        return Ok(CalibrationStats {
+            brier_score: None,
+            ev_error: None,
+            win_rate: None,
+            trade_count: 0,
+        });
+    }
+
+    let wins: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM trades \
+             WHERE status='profit' AND dry_run=0 AND actual_profit > 0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let win_rate = if trade_count > 0 { wins as f64 / trade_count as f64 } else { 0.0 };
+
+    let ev_error: Option<f64> = conn
+        .query_row(
+            "SELECT AVG(ABS(expected_profit - actual_profit)) FROM trades \
+             WHERE status IN ('profit','loss','resolved') AND dry_run=0 AND actual_profit IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .ok();
+
+    Ok(CalibrationStats {
+        brier_score: None,
+        ev_error,
+        win_rate: Some(win_rate),
+        trade_count,
+    })
+}
+
+pub fn get_portfolio_breakdown(db: &str) -> Result<Vec<CategoryBreakdown>> {
+    let conn = Connection::open(db)?;
+    conn.execute_batch("PRAGMA journal_mode=WAL;")?;
+    conn.busy_timeout(std::time::Duration::from_millis(3000))?;
+
+    let rows = conn.prepare(
+        "SELECT market_id, actual_profit, expected_profit, status FROM trades \
+         WHERE dry_run=0 AND opened_at > datetime('now', '-30 days')"
+    )?.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<f64>>(1)?,
+            row.get::<_, f64>(2)?,
+            row.get::<_, String>(3)?,
+        ))
+    })?.filter_map(|r| r.ok()).collect::<Vec<_>>();
+
+    let mut categories: std::collections::HashMap<String, (f64, i64, i64)> =
+        std::collections::HashMap::new();
+
+    for (market_id, actual, expected, _status) in rows {
+        let cat = infer_category(&market_id);
+        let profit = actual.unwrap_or(expected);
+        let is_win = profit > 0.0;
+        let entry = categories.entry(cat).or_insert((0.0, 0, 0));
+        entry.0 += profit;
+        entry.1 += 1;
+        if is_win { entry.2 += 1; }
+    }
+
+    let mut result: Vec<CategoryBreakdown> = categories
+        .into_iter()
+        .map(|(cat, (pnl, count, wins))| CategoryBreakdown {
+            category: cat,
+            pnl: (pnl * 100.0).round() / 100.0,
+            trade_count: count,
+            win_rate: if count > 0 { wins as f64 / count as f64 } else { 0.0 },
+        })
+        .collect();
+    result.sort_by(|a, b| b.pnl.partial_cmp(&a.pnl).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(result)
+}
+
+fn infer_category(market_id: &str) -> String {
+    let m = market_id.to_lowercase();
+    if m.contains("btc") || m.contains("eth") || m.contains("crypto") {
+        return "crypto".to_string();
+    }
+    if m.contains("election") || m.contains("president") || m.contains("senate") {
+        return "politics".to_string();
+    }
+    if m.contains("nfl") || m.contains("nba") || m.contains("sport") {
+        return "sports".to_string();
+    }
+    if m.contains("fed") || m.contains("rate") || m.contains("cpi") {
+        return "macro".to_string();
+    }
+    "other".to_string()
 }
