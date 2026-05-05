@@ -12,6 +12,7 @@ import tracker
 from detector import GapDetector
 from executor import Executor
 from matcher import Matcher
+from reconciler import Reconciler
 
 load_dotenv()
 
@@ -46,6 +47,7 @@ CONFIG = {
     "ev_slippage_cents": float(os.getenv("EV_SLIPPAGE_CENTS", "0.5")),
     "bankroll_usdc": float(os.getenv("BANKROLL_USDC", "500.0")),
     "kelly_fraction": float(os.getenv("KELLY_FRACTION", "0.25")),
+    "reconcile_interval_s": float(os.getenv("RECONCILE_INTERVAL_S", "300.0")),
 }
 
 rust_process = None
@@ -112,6 +114,9 @@ async def main():
     stdout_queue: asyncio.Queue = asyncio.Queue()
 
     executor = Executor(CONFIG, rust_process.stdin, stdout_queue)
+
+    reconciler = Reconciler(CONFIG, db_conn)
+    asyncio.create_task(reconciler.run_forever())
 
     asyncio.create_task(_read_stderr(rust_process.stderr))
     asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn))
