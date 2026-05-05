@@ -29,6 +29,9 @@ import {
   Square,
   Loader2,
 } from "lucide-solid";
+import RiskPanel from "./components/RiskPanel";
+import CalibrationPanel from "./components/CalibrationPanel";
+import PortfolioPanel from "./components/PortfolioPanel";
 
 interface Stats {
   pairs_count: number;
@@ -303,6 +306,14 @@ export default function App() {
 
   createEffect(() => {
     localStorage.setItem("pk_show_chart", String(showChart()));
+  });
+
+  const [showAnalytics, setShowAnalytics] = createSignal(
+    localStorage.getItem("pk_show_analytics") === "true"
+  );
+
+  createEffect(() => {
+    localStorage.setItem("pk_show_analytics", String(showAnalytics()));
   });
 
   const mode = createMemo(() =>
@@ -697,6 +708,14 @@ export default function App() {
           >
             {showChart() ? "Hide Chart" : "P&L Chart"}
           </button>
+          <button
+            type="button"
+            class="btn btn-ghost btn-with-icon"
+            aria-label="Toggle analytics panels"
+            onClick={() => setShowAnalytics((v) => !v)}
+          >
+            {showAnalytics() ? "Hide Analytics" : "Analytics"}
+          </button>
           <button type="button" class="btn btn-ghost btn-with-icon" aria-label="Open settings" onClick={openSettings}>
             <SettingsIcon size={15} strokeWidth={2} />
             Settings
@@ -772,6 +791,12 @@ export default function App() {
           </Show>
         </div>
       </div>
+
+      <Show when={showAnalytics()}>
+        <RiskPanel />
+        <CalibrationPanel />
+        <PortfolioPanel />
+      </Show>
 
       <div class="panel">
         <div class="panel-header">
