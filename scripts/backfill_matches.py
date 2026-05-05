@@ -179,10 +179,23 @@ async def main():
     mode_label = "CROSS PLATFORM (Polymarket ↔ Kalshi)" if kalshi_mode else "INTERNAL (Polymarket negRisk)"
     print(f"Mode: {mode_label}")
 
+    # Build fee_rate lookup: gamma_id → fee_rate
+    # feeSchedule.rate is the taker fee (0.04 = 4% for politics, 0.02 = 2% for others)
+    fee_rate_by_gamma_id: dict[str, float] = {}
+    for m in poly_markets:
+        gamma_id = str(m.get("id", ""))
+        schedule = m.get("feeSchedule") or {}
+        rate = float(schedule.get("rate", 0.04))
+        if gamma_id:
+            fee_rate_by_gamma_id[gamma_id] = rate
+
     if kalshi_mode:
-        pairs = matcher.match(liquid_markets, kalshi_markets)
+        cross_pairs = matcher.match(liquid_markets, kalshi_markets)
+        internal_pairs = matcher.create_internal_pairs(liquid_markets, full_markets=poly_markets)
+        pairs = cross_pairs + internal_pairs
+        print(f"  Cross-platform: {len(cross_pairs)} pairs | Internal fallback: {len(internal_pairs)} pairs")
     else:
-        print("  Kalshi returned 0 markets — falling back to internal negRisk pairs")
+        print("  Kalshi returned 0 markets — falling back to internal negRisk pairs only")
         pairs = matcher.create_internal_pairs(liquid_markets, full_markets=poly_markets)
 
     print(f"Matched {len(pairs)} pairs")
@@ -200,6 +213,7 @@ async def main():
             "gamma_id_a": pair.gamma_id_a,
             "gamma_id_b": pair.gamma_id_b,
             "outcome_count": pair.outcome_count,
+            "fee_rate": fee_rate_by_gamma_id.get(pair.gamma_id_a, 0.04),
         }
         if pair.pair_type == "cross_platform":
             entry["polymarket_slug"] = pair.polymarket_slug
