@@ -1,0 +1,114 @@
+# -----------------------------------------------------------------------------
+# OS / editor
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# -----------------------------------------------------------------------------
+# Logs / temp
+# -----------------------------------------------------------------------------
+*.log
+*.tmp
+tmp/
+temp/
+
+# -----------------------------------------------------------------------------
+# Environment / secrets
+# -----------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# -----------------------------------------------------------------------------
+# Node / JS / TS (tauri-app frontend)
+# -----------------------------------------------------------------------------
+node_modules/
+.npm/
+.pnpm-store/
+.yarn/
+dist/
+build/
+.next/
+.nuxt/
+.svelte-kit/
+.cache/
+coverage/
+*.tsbuildinfo
+
+# -----------------------------------------------------------------------------
+# Python (python-core)
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.python-version
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+htmlcov/
+.coverage
+.coverage.*
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# -----------------------------------------------------------------------------
+# Rust / Cargo (rust-core, src-tauri)
+# -----------------------------------------------------------------------------
+target/
+**/target/
+# Keep Cargo.lock for applications, but ignore for library crates if needed.
+# Cargo.lock
+
+# -----------------------------------------------------------------------------
+# Tauri
+# -----------------------------------------------------------------------------
+tauri-app/src-tauri/target/
+
+# -----------------------------------------------------------------------------
+# Project-specific (existing)
+# -----------------------------------------------------------------------------
+.rkt_snapshot/
+.rkt_meta.json
+.rkt_handoff_prompt.md
+bun.lock
+ruvector.db
+
+.cursor/
+CLAUDE.md
+AGENTS.md
+the-rocket-guide.md
+TROUBLESHOOTING.md
+memory-bank/
+graphify-out/
+.claude-flow/
+.swarm/
+code-review-graph/
+.mcp.json
+.claude/commands/
+.claude/agents/
+.claude/helpers/
+.claude/skills/
+.claude/setup-plugins.md
+.claude/memory.db
+.claude/settings.json
+
+.env
+node_modules
+target
+dist
