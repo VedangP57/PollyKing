@@ -85,6 +85,9 @@ pub fn run() {
             commands::get_recent_trades,
             commands::start_bot,
             commands::stop_bot,
+            commands::get_risk_state,
+            commands::get_calibration_stats,
+            commands::get_portfolio_breakdown,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

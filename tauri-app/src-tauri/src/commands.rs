@@ -265,3 +265,18 @@ fn find_main_py() -> String {
     let main = root.join("python-core/main.py");
     main.to_string_lossy().to_string()
 }
+
+#[tauri::command]
+pub fn get_risk_state() -> Result<db::RiskState, String> {
+    db::get_risk_state(&db::db_path()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_calibration_stats() -> Result<db::CalibrationStats, String> {
+    db::get_calibration_stats(&db::db_path()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_portfolio_breakdown() -> Result<Vec<db::CategoryBreakdown>, String> {
+    db::get_portfolio_breakdown(&db::db_path()).map_err(|e| e.to_string())
+}
