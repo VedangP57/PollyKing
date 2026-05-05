@@ -1,7 +1,7 @@
-use arb::{bridge, comparator, executor, fetcher, types};
+use arb::{bridge, comparator, fetcher, types};
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use log::info;
@@ -16,24 +16,14 @@ async fn main() -> Result<()> {
     let config = AppConfig::from_env()?;
     info!("Arb bot starting. DRY_RUN={}", config.dry_run);
 
-    // Load market pairs from config/markets.json (passed via env or hardcoded path)
     let pairs = load_market_pairs();
     info!("Loaded {} market pairs", pairs.len());
 
-    // RwLock: comparator reads every 10ms (read lock, zero clone, non-exclusive).
-    // Fetchers write infrequently (every 2–5s) via write lock.
     let price_map: Arc<RwLock<HashMap<String, types::Price>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
     let (gap_tx, gap_rx) = crossbeam_channel::bounded::<types::Gap>(1000);
-    let (order_tx, order_rx) =
-        crossbeam_channel::bounded::<(types::ExecuteCommand, types::Gap)>(100);
 
-    let pending_gaps: Arc<Mutex<HashMap<String, types::Gap>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-
-    // Build token → gamma_id map for REST price polling.
-    // token_a always has a gamma_id; token_b has one only for internal pairs.
     let token_to_gamma_id: HashMap<String, String> = pairs
         .iter()
         .flat_map(|p| {
@@ -46,7 +36,6 @@ async fn main() -> Result<()> {
         .filter(|(tok, gid)| !tok.is_empty() && !gid.is_empty())
         .collect();
 
-    // Cross-platform pairs only for Kalshi fetcher
     let kalshi_pairs: Vec<MarketPair> = pairs
         .iter()
         .filter(|p| p.pair_type == types::PairType::CrossPlatform)
@@ -62,10 +51,10 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Spawn Kalshi REST poller (public API — no key needed for price reads)
+    // Spawn Kalshi REST poller
     let kalshi_map = Arc::clone(&price_map);
-    let kalshi_api_url = config.kalshi_api_url.clone();  // https://api.elections.kalshi.com/...
-    let kalshi_key = config.kalshi_api_key.clone();       // only needed for live trading
+    let kalshi_api_url = config.kalshi_api_url.clone();
+    let kalshi_key = config.kalshi_api_key.clone();
     let kalshi_secret = config.kalshi_api_secret.clone();
     tokio::spawn(async move {
         if let Err(e) =
@@ -80,30 +69,14 @@ async fn main() -> Result<()> {
     let comp_map = Arc::clone(&price_map);
     let comp_pairs = pairs.clone();
     let comp_config = config.clone();
-    let gap_tx_clone = gap_tx.clone();
     tokio::spawn(async move {
-        if let Err(e) = comparator::run(comp_config, comp_pairs, comp_map, gap_tx_clone).await {
+        if let Err(e) = comparator::run(comp_config, comp_pairs, comp_map, gap_tx).await {
             log::error!("Comparator error: {e}");
         }
     });
 
-    // Spawn executor listener
-    let exec_config = config.clone();
-    tokio::spawn(async move {
-        while let Ok((cmd, _gap)) = order_rx.recv() {
-            match executor::execute(cmd, &exec_config).await {
-                Ok(confirmation) => {
-                    if let Err(e) = bridge::write_confirmation(&confirmation).await {
-                        log::error!("Failed to write confirmation: {e}");
-                    }
-                }
-                Err(e) => log::error!("Executor error: {e}"),
-            }
-        }
-    });
-
-    // Run bridge in main task (blocks on stdin/stdout)
-    bridge::run(gap_rx, order_tx, pending_gaps).await?;
+    // Bridge: write gaps to stdout (one-directional — Python handles all execution)
+    bridge::run(gap_rx).await?;
 
     Ok(())
 }
@@ -122,7 +95,6 @@ fn load_market_pairs() -> Vec<MarketPair> {
         Err(_) => return vec![],
     };
 
-    // New format: "pairs" array with token_a/token_b/pair_type
     if let Some(pairs) = val["pairs"].as_array() {
         return pairs
             .iter()
@@ -146,23 +118,5 @@ fn load_market_pairs() -> Vec<MarketPair> {
             .collect();
     }
 
-    // Legacy fallback: "manual_pairs" with polymarket_slug/kalshi_ticker
-    val["manual_pairs"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|p| {
-            let slug = p["polymarket_slug"].as_str()?;
-            let ticker = p["kalshi_ticker"].as_str()?;
-            Some(MarketPair {
-                pair_type: types::PairType::CrossPlatform,
-                token_a: slug.to_string(),
-                token_b: ticker.to_string(),
-                market_id: slug.to_string(),
-                gamma_id_a: String::new(),
-                gamma_id_b: String::new(),
-            })
-        })
-        .collect()
+    vec![]
 }
