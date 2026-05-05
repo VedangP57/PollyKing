@@ -6,13 +6,15 @@ import json
 
 import sqlite3
 from ev_engine import calculate_arb_ev
+from risk_engine import RiskEngine
 from tracker import get_daily_loss, get_open_position_count
 
 
 class GapDetector:
-    def __init__(self, config: dict, db_conn: sqlite3.Connection):
+    def __init__(self, config: dict, db_conn: sqlite3.Connection, risk_engine: "RiskEngine | None" = None):
         self.config = config
         self.db_conn = db_conn
+        self.risk_engine = risk_engine
         # market_id -> deque of gap_cents (recent history, max 10, O(1) append+pop)
         self._history: dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
         self._stale_flags: dict[str, bool] = {}
@@ -32,6 +34,19 @@ class GapDetector:
         poly_price = gap["polymarket_price"]
         kalshi_price = gap["kalshi_price"]
         gap_cents = gap["gap_cents"]
+
+        # Kill switch gate
+        if self.risk_engine:
+            ks_ok, ks_reason = self.risk_engine.check_kill_switches()
+            if not ks_ok:
+                return False, ks_reason
+
+        # Correlated exposure gate
+        if self.risk_engine:
+            proposed = self.config.get("min_bet_usdc", 10.0)
+            exp_ok, exp_reason = self.risk_engine.check_exposure(gap, proposed)
+            if not exp_ok:
+                return False, exp_reason
 
         # Check 0a: Blacklisted event gate
         # market_id format for internal pairs: "eventId::tokenA-tokenB"

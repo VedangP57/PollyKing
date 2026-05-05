@@ -13,6 +13,7 @@ from detector import GapDetector
 from executor import Executor
 from matcher import Matcher
 from reconciler import Reconciler
+from risk_engine import RiskEngine, KillSwitch
 
 load_dotenv()
 
@@ -48,6 +49,7 @@ CONFIG = {
     "bankroll_usdc": float(os.getenv("BANKROLL_USDC", "500.0")),
     "kelly_fraction": float(os.getenv("KELLY_FRACTION", "0.25")),
     "reconcile_interval_s": float(os.getenv("RECONCILE_INTERVAL_S", "300.0")),
+    "max_category_exposure_usdc": float(os.getenv("MAX_CATEGORY_EXPOSURE_USDC", "200.0")),
 }
 
 rust_process = None
@@ -81,8 +83,9 @@ async def main():
     notifier.logger.info(f"Running in {mode} mode")
 
     db_conn = tracker.init_db(CONFIG["db_path"])
+    risk_engine = RiskEngine(CONFIG, db_conn)
     matcher = Matcher(CONFIG["markets_json"])
-    detector = GapDetector(CONFIG, db_conn)
+    detector = GapDetector(CONFIG, db_conn, risk_engine)
 
     # Load pairs from markets.json — prefer new "pairs" format, fall back to manual_pairs
     try:
