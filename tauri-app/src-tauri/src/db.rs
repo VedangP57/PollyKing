@@ -185,7 +185,7 @@ fn query_trades(conn: &Connection) -> Result<Vec<Trade>> {
          FROM trades t
          LEFT JOIN gaps g ON t.gap_id = g.id
          ORDER BY t.opened_at DESC
-         LIMIT 50",
+         LIMIT 500",
     )?;
     let rows = stmt.query_map([], |r| {
         let opened_at: String = r.get(1).unwrap_or_default();

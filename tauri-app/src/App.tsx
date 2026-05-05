@@ -679,7 +679,16 @@ export default function App() {
           </span>
         </Show>
 
-        <span class={`topbar-status sync-indicator ${syncing() ? "syncing" : ""}`} aria-live="polite">
+        <span class={`topbar-status sync-indicator ${syncing() ? "syncing" : ""}`} aria-live="polite" style="display:flex;align-items:center;gap:6px;">
+          <span style={{
+            display: "inline-block",
+            width: "9px",
+            height: "9px",
+            "border-radius": "50%",
+            background: initialLoading() ? "#888" : running() ? "#22c55e" : "#ef4444",
+            animation: running() ? "bot-pulse 1.8s infinite" : "none",
+            "flex-shrink": "0",
+          }} />
           {initialLoading()
             ? "loading…"
             : syncing()
