@@ -185,7 +185,7 @@ fn query_trades(conn: &Connection) -> Result<Vec<Trade>> {
          FROM trades t
          LEFT JOIN gaps g ON t.gap_id = g.id
          ORDER BY t.opened_at DESC
-         LIMIT 20",
+         LIMIT 50",
     )?;
     let rows = stmt.query_map([], |r| {
         let opened_at: String = r.get(1).unwrap_or_default();
@@ -369,7 +369,7 @@ pub fn get_calibration_stats(db: &str) -> Result<CalibrationStats> {
 
     let trade_count: i64 = conn
         .query_row(
-            "SELECT COUNT(*) FROM trades WHERE status IN ('profit','loss','resolved') AND dry_run=0",
+            "SELECT COUNT(*) FROM trades WHERE status IN ('profit','loss','resolved','closed')",
             [],
             |row| row.get(0),
         )
@@ -387,7 +387,7 @@ pub fn get_calibration_stats(db: &str) -> Result<CalibrationStats> {
     let wins: i64 = conn
         .query_row(
             "SELECT COUNT(*) FROM trades \
-             WHERE status='profit' AND dry_run=0 AND actual_profit > 0",
+             WHERE status IN ('profit','closed') AND actual_profit > 0",
             [],
             |row| row.get(0),
         )
@@ -397,7 +397,7 @@ pub fn get_calibration_stats(db: &str) -> Result<CalibrationStats> {
     let ev_error: Option<f64> = conn
         .query_row(
             "SELECT AVG(ABS(expected_profit - actual_profit)) FROM trades \
-             WHERE status IN ('profit','loss','resolved') AND dry_run=0 AND actual_profit IS NOT NULL",
+             WHERE status IN ('profit','loss','resolved','closed') AND actual_profit IS NOT NULL",
             [],
             |row| row.get(0),
         )
@@ -419,7 +419,7 @@ pub fn get_portfolio_breakdown(db: &str) -> Result<Vec<CategoryBreakdown>> {
 
     let rows = conn.prepare(
         "SELECT market_id, actual_profit, expected_profit, status FROM trades \
-         WHERE dry_run=0 AND opened_at > datetime('now', '-30 days')"
+         WHERE opened_at > datetime('now', '-30 days')"
     )?.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
