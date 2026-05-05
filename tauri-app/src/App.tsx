@@ -123,10 +123,9 @@ function errText(e: unknown): string {
 
 function clampSettings(s: UiSettings): UiSettings {
   return {
-    // Keep polling conservative to avoid backend thrash in Tauri desktop.
-    gapPollMs: Math.min(120_000, Math.max(5_000, Number(s.gapPollMs) || 8_000)),
-    tradePollMs: Math.min(300_000, Math.max(8_000, Number(s.tradePollMs) || 12_000)),
-    modePollMs: Math.min(120_000, Math.max(8_000, Number(s.modePollMs) || 10_000)),
+    gapPollMs: Math.min(120_000, Math.max(2_000, Number(s.gapPollMs) || 2_000)),
+    tradePollMs: Math.min(300_000, Math.max(3_000, Number(s.tradePollMs) || 3_000)),
+    modePollMs: Math.min(120_000, Math.max(3_000, Number(s.modePollMs) || 3_000)),
     notifyGapMinCents:
       s.notifyGapMinCents === null || s.notifyGapMinCents === undefined
         ? null
@@ -135,9 +134,9 @@ function clampSettings(s: UiSettings): UiSettings {
 }
 
 const DEFAULT_SETTINGS: UiSettings = clampSettings({
-  gapPollMs: 8000,
-  tradePollMs: 12000,
-  modePollMs: 10000,
+  gapPollMs: 2000,
+  tradePollMs: 3000,
+  modePollMs: 3000,
   notifyGapMinCents: null,
 });
 
@@ -288,9 +287,9 @@ export default function App() {
   const [liveConfirmOpen, setLiveConfirmOpen] = createSignal(false);
   const [settingsTab, setSettingsTab] = createSignal<"general" | "log">("general");
 
-  const [draftGapMs, setDraftGapMs] = createSignal("8000");
-  const [draftTradeMs, setDraftTradeMs] = createSignal("12000");
-  const [draftModeMs, setDraftModeMs] = createSignal("10000");
+  const [draftGapMs, setDraftGapMs] = createSignal("2000");
+  const [draftTradeMs, setDraftTradeMs] = createSignal("3000");
+  const [draftModeMs, setDraftModeMs] = createSignal("3000");
   const [draftNotify, setDraftNotify] = createSignal("");
   const [logText, setLogText] = createSignal("");
   const [logLoading, setLogLoading] = createSignal(false);
