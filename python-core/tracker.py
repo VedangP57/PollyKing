@@ -238,10 +238,12 @@ def get_open_position_count(conn: sqlite3.Connection) -> int:
 def get_open_live_trades(conn: sqlite3.Connection) -> list[dict]:
     """Return all live (non-dry) open trades with their market_ids."""
     rows = conn.execute(
-        """SELECT id, market_id, polymarket_order_id, kalshi_order_id,
-                  amount_usdc, expected_profit, opened_at
-           FROM trades
-           WHERE status = 'open' AND dry_run = 0"""
+        """SELECT t.id, g.market_id, t.polymarket_order_id, t.kalshi_order_id,
+                  t.polymarket_side, t.kalshi_side,
+                  t.amount_usdc, t.expected_profit, t.opened_at
+           FROM trades t
+           LEFT JOIN gaps g ON g.id = t.gap_id
+           WHERE t.status = 'open' AND t.dry_run = 0"""
     ).fetchall()
     return [dict(r) for r in rows]
 
