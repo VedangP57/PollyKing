@@ -28,30 +28,53 @@ def make_trade(db, *, amount_usdc=50.0, expected_profit=2.0, dry_run=False):
     })
 
 
-def test_compute_actual_profit_yes_resolution():
+def test_compute_profit_yes_resolution_cross_platform():
+    # combined = 1.0 - 8.0/100 = 0.92
+    # k = 10.0 / 0.92 = 10.8696...
+    # gross = 10.8696 - 10.0 = 0.8696
+    # fee = 0.02 * 10 = 0.20
+    # net = 0.8696 - 0.20 = 0.6696 ≈ 0.67
     result = compute_actual_profit(
-        polymarket_side="NO",
+        poly_side="NO",
         kalshi_side="YES",
         resolution="YES",
-        amount_usdc=50.0,
-        polymarket_amount=23.5,
-        kalshi_amount=26.5,
+        amount_usdc=10.0,
+        gap_cents=8.0,
+        fee_rate=0.02,
     )
     assert isinstance(result, ResolutionResult)
-    assert result.status in ("profit", "loss", "resolved")
-    assert isinstance(result.actual_profit, float)
+    assert result.status == "profit"
+    assert abs(result.actual_profit - 0.67) < 0.02
 
 
-def test_compute_actual_profit_no_resolution():
+def test_compute_profit_no_resolution_cross_platform():
+    # Same formula — arb pays regardless of which side wins
     result = compute_actual_profit(
-        polymarket_side="NO",
+        poly_side="NO",
         kalshi_side="YES",
         resolution="NO",
-        amount_usdc=50.0,
-        polymarket_amount=23.5,
-        kalshi_amount=26.5,
+        amount_usdc=10.0,
+        gap_cents=8.0,
+        fee_rate=0.02,
     )
-    assert result.status in ("profit", "loss", "resolved")
+    assert result.status == "profit"
+    assert abs(result.actual_profit - 0.67) < 0.02
+
+
+def test_compute_profit_internal_pair():
+    # combined = 1.0 - 5.0/100 = 0.95
+    # k = 10.0 / 0.95 = 10.526
+    # gross = 0.526, fee = 0.04*10 = 0.40, net = 0.126
+    result = compute_actual_profit(
+        poly_side="YES",
+        kalshi_side="YES",
+        resolution="YES",
+        amount_usdc=10.0,
+        gap_cents=5.0,
+        fee_rate=0.04,
+    )
+    assert result.status == "profit"
+    assert result.actual_profit > 0
 
 
 def test_open_live_trades_excludes_dry(db):

@@ -21,23 +21,26 @@ class ResolutionResult:
 
 
 def compute_actual_profit(
-    polymarket_side: str,
+    poly_side: str,
     kalshi_side: str,
     resolution: str,
     amount_usdc: float,
-    polymarket_amount: float,
-    kalshi_amount: float,
+    gap_cents: float,
+    fee_rate: float = 0.04,
 ) -> ResolutionResult:
     """Compute actual profit for a resolved two-leg arb trade.
 
-    For guaranteed arb both sides net together. We approximate:
-    actual_profit ≈ amount_usdc * gap_fraction (8% conservative estimate).
+    For guaranteed arb, the net profit is the same regardless of which leg wins.
+    gross = (amount_usdc / combined) - amount_usdc
+    net   = gross - fee_rate * amount_usdc
     """
-    # For arb: one leg wins, other loses. Net ≈ gap * stake.
-    # Without exact fill prices we approximate using a conservative 8% of stake.
-    actual_profit = amount_usdc * 0.08
+    combined = 1.0 - gap_cents / 100.0
+    k = amount_usdc / combined if combined > 0 else 0.0
+    gross = k - amount_usdc
+    fee = fee_rate * amount_usdc
+    actual_profit = round(gross - fee, 4)
     status = "profit" if actual_profit >= 0 else "loss"
-    return ResolutionResult(trade_id=0, status=status, actual_profit=round(actual_profit, 4))
+    return ResolutionResult(trade_id=0, status=status, actual_profit=actual_profit)
 
 
 async def _fetch_market_status(session: aiohttp.ClientSession, gamma_id: str) -> Optional[dict]:
@@ -88,12 +91,12 @@ class Reconciler:
 
             resolution = "YES" if data.get("resolutionPrice", 0) > 0.5 else "NO"
             result = compute_actual_profit(
-                polymarket_side=trade.get("polymarket_side", "NO"),
+                poly_side=trade.get("polymarket_side", "NO"),
                 kalshi_side=trade.get("kalshi_side", "YES"),
                 resolution=resolution,
                 amount_usdc=trade["amount_usdc"],
-                polymarket_amount=trade["amount_usdc"] / 2,
-                kalshi_amount=trade["amount_usdc"] / 2,
+                gap_cents=float(trade.get("gap_cents") or 8.0),
+                fee_rate=float(trade.get("fee_rate") or 0.04),
             )
             resolve_trade(self.db, trade["id"], result.actual_profit, result.status)
             log.info(f"Reconciled trade #{trade['id']}: {result.status} ${result.actual_profit:.2f}")
