@@ -40,12 +40,12 @@ export default function CalibrationPanel() {
         </div>
         <div class="stat-card">
           <div class="stat-label">EV Error (MAE)</div>
-          <div class="stat-value">${fmt(d()?.ev_error ?? null, 2)}</div>
+          <div class="stat-value">{d()?.ev_error != null ? `$${d()!.ev_error!.toFixed(2)}` : "—"}</div>
           <div class="stat-sub">expected vs actual profit</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">Win Rate</div>
-          <div class={`stat-value ${(d()?.win_rate ?? 0) >= 0.5 ? "green" : ""}`}>
+          <div class={`stat-value ${d()?.win_rate != null && d()!.win_rate! >= 0.5 ? "green" : ""}`}>
             {d()?.win_rate !== null && d()?.win_rate !== undefined
               ? `${((d()!.win_rate!) * 100).toFixed(1)}%`
               : "—"}
