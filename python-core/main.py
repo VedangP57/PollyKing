@@ -41,6 +41,9 @@ CONFIG = {
     "db_path": os.getenv("DB_PATH", "data/trades.db"),
     "rust_binary": os.getenv("RUST_BINARY", "rust-core/target/release/arb"),
     "markets_json": os.getenv("MARKETS_JSON", "config/markets.json"),
+    "ev_min_cents": float(os.getenv("EV_MIN_CENTS", "1.0")),
+    "ev_taker_fee_rate": float(os.getenv("EV_TAKER_FEE_RATE", "0.02")),
+    "ev_slippage_cents": float(os.getenv("EV_SLIPPAGE_CENTS", "0.5")),
 }
 
 rust_process = None

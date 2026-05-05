@@ -5,6 +5,7 @@ from typing import Optional
 import json
 
 import sqlite3
+from ev_engine import calculate_arb_ev
 from tracker import get_daily_loss, get_open_position_count
 
 
@@ -69,6 +70,16 @@ class GapDetector:
         if combined >= 0.95:
             return False, f"Combined price {combined:.3f} >= 0.95 (no profit after fees)"
 
+        # Check 1b: EV net must exceed minimum threshold after fees + slippage
+        taker_fee_rate = self.config.get("ev_taker_fee_rate", 0.02)
+        slippage_cents = self.config.get("ev_slippage_cents", 0.5)
+        ev_min_cents = self.config.get("ev_min_cents", 1.0)
+        arb_ev = calculate_arb_ev(combined, taker_fee_rate, slippage_cents)
+        if arb_ev["ev_net_cents"] < ev_min_cents:
+            return False, (
+                f"EV_net {arb_ev['ev_net_cents']:.2f}¢ < min {ev_min_cents:.1f}¢"
+            )
+
         # Check 2: Gap must be stable for 3+ consecutive updates
         history = self._history[market_id]
         history.append(gap_cents)  # deque(maxlen=10) auto-evicts oldest — O(1)
@@ -76,7 +87,7 @@ class GapDetector:
         if len(history) < 3:
             return False, f"Gap too new — only {len(history)} update(s), need 3"
 
-        recent = history[-3:]
+        recent = list(history)[-3:]
         if not _is_stable(recent):
             return False, f"Gap unstable — recent: {recent}"
 

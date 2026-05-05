@@ -20,24 +20,7 @@ def init_db(db_path: str) -> sqlite3.Connection:
 
 
 def _create_tables(conn: sqlite3.Connection) -> None:
-    # Migrations — idempotent, safe to run on existing DBs
-    for migration in [
-        "ALTER TABLE market_pairs ADD COLUMN outcome_count INTEGER DEFAULT 0",
-        "ALTER TABLE gaps ADD COLUMN outcome_count INTEGER DEFAULT 0",
-    ]:
-        try:
-            conn.execute(migration)
-            conn.commit()
-        except Exception:
-            pass  # Column already exists
-
     conn.executescript("""
-        -- Performance indexes — idempotent
-        CREATE INDEX IF NOT EXISTS idx_gaps_detected ON gaps(detected_at);
-        CREATE INDEX IF NOT EXISTS idx_gaps_market_detected ON gaps(market_id, detected_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_trades_opened ON trades(opened_at);
-        CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
-
         CREATE TABLE IF NOT EXISTS gaps (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             market_id TEXT NOT NULL,
@@ -84,8 +67,25 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             last_seen TEXT,
             UNIQUE(token_a, token_b)
         );
+
+        -- Performance indexes — idempotent (must come after CREATE TABLE)
+        CREATE INDEX IF NOT EXISTS idx_gaps_detected ON gaps(detected_at);
+        CREATE INDEX IF NOT EXISTS idx_gaps_market_detected ON gaps(market_id, detected_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_trades_opened ON trades(opened_at);
+        CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
     """)
     conn.commit()
+
+    # Migrations — idempotent, safe to run on existing DBs (tables guaranteed to exist now)
+    for migration in [
+        "ALTER TABLE market_pairs ADD COLUMN outcome_count INTEGER DEFAULT 0",
+        "ALTER TABLE gaps ADD COLUMN outcome_count INTEGER DEFAULT 0",
+    ]:
+        try:
+            conn.execute(migration)
+            conn.commit()
+        except Exception:
+            pass  # Column already exists
 
 
 _GAP_LOG_COOLDOWN_MINUTES = 5  # log the same market gap at most once every 5 minutes
