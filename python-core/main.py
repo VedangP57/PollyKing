@@ -44,6 +44,8 @@ CONFIG = {
     "ev_min_cents": float(os.getenv("EV_MIN_CENTS", "1.0")),
     "ev_taker_fee_rate": float(os.getenv("EV_TAKER_FEE_RATE", "0.02")),
     "ev_slippage_cents": float(os.getenv("EV_SLIPPAGE_CENTS", "0.5")),
+    "bankroll_usdc": float(os.getenv("BANKROLL_USDC", "500.0")),
+    "kelly_fraction": float(os.getenv("KELLY_FRACTION", "0.25")),
 }
 
 rust_process = None

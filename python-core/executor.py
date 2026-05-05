@@ -2,6 +2,8 @@ import asyncio
 import json
 from typing import Optional
 
+from kelly_engine import compute_arb_kelly_size
+
 
 class Executor:
     def __init__(self, config: dict, rust_stdin, rust_stdout_queue: asyncio.Queue):
@@ -40,7 +42,7 @@ class Executor:
         if gap_cents <= 0:
             return None
 
-        bet_size = _compute_bet_size(gap_cents, self.config)
+        bet_size = _compute_bet_size(gap, self.config)
 
         # Equal-payout sizing: buy K contracts of each at their price
         # K = bet_size / combined  →  total spend = K*price_a + K*price_b = bet_size
@@ -80,9 +82,30 @@ class Executor:
         await self.rust_stdin.drain()
 
 
-def _compute_bet_size(gap_cents: float, config: dict) -> float:
+def _compute_bet_size(gap: dict, config: dict) -> float:
+    """Fractional Kelly bet sizing. Falls back to min_bet if Kelly says NO_BET."""
+    bankroll = config.get("bankroll_usdc", 500.0)
+    fraction = config.get("kelly_fraction", 0.25)
     min_bet = config.get("min_bet_usdc", 10.0)
     max_bet = config.get("max_bet_usdc", 100.0)
-    # Scale bet size with gap size — bigger gaps get bigger bets
-    scaled = min_bet + (gap_cents / 30.0) * (max_bet - min_bet)
-    return min(max(scaled, min_bet), max_bet)
+    confidence = gap.get("confidence", "medium")
+
+    pair_type = gap.get("pair_type", "cross_platform")
+    poly_price = gap["polymarket_price"]
+    kalshi_price = gap["kalshi_price"]
+    combined = (
+        poly_price + kalshi_price
+        if pair_type == "internal"
+        else (1.0 - poly_price) + kalshi_price
+    )
+
+    result = compute_arb_kelly_size(
+        bankroll=bankroll,
+        combined=combined,
+        confidence=confidence,
+        fraction=fraction,
+        max_bet_pct=0.05,
+        min_bet_usdc=min_bet,
+        max_bet_usdc=max_bet,
+    )
+    return result["bet_usdc"] if result["action"] == "BET" else min_bet
