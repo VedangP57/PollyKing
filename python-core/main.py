@@ -13,6 +13,7 @@ from detector import GapDetector
 from executor import Executor
 from matcher import Matcher
 from reconciler import Reconciler
+from bayes_engine import BayesEngine
 from risk_engine import RiskEngine, KillSwitch
 
 load_dotenv()
@@ -84,6 +85,7 @@ async def main():
 
     db_conn = tracker.init_db(CONFIG["db_path"])
     risk_engine = RiskEngine(CONFIG, db_conn)
+    bayes_engine = BayesEngine()
     matcher = Matcher(CONFIG["markets_json"])
     detector = GapDetector(CONFIG, db_conn, risk_engine)
 
@@ -122,12 +124,12 @@ async def main():
     asyncio.create_task(reconciler.run_forever())
 
     asyncio.create_task(_read_stderr(rust_process.stderr))
-    asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn))
+    asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn, bayes_engine))
 
     await rust_process.wait()
 
 
-async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, db_conn):
+async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, db_conn, bayes_engine: BayesEngine):
     async for line in stdout:
         text = line.decode().strip()
         if not text:
@@ -144,15 +146,21 @@ async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, 
             # Fire-and-forget: _handle_gap waits on stdout_queue for the Rust
             # confirmation. If we awaited it directly here, _read_stdout would
             # block and never read the confirmation line from Rust → deadlock.
-            asyncio.create_task(_handle_gap(event, detector, executor, db_conn, stdout_queue))
+            asyncio.create_task(_handle_gap(event, detector, executor, db_conn, stdout_queue, bayes_engine))
         elif event_type == "order_placed":
             await stdout_queue.put(event)
 
 
-async def _handle_gap(gap: dict, detector: GapDetector, executor: Executor, db_conn, stdout_queue):
+async def _handle_gap(gap: dict, detector: GapDetector, executor: Executor, db_conn, stdout_queue, bayes_engine: BayesEngine):
     notifier.gap_detected(gap)
 
     market_id = gap["market_id"]
+
+    # Update Bayesian posterior for this market
+    poly_price = gap.get("polymarket_price", 0.5)
+    bayes_engine.update(market_id, poly_price, prev_price=None)
+    posterior = bayes_engine.get_posterior(market_id)
+    gap["p_model"] = posterior
 
     # Per-market cooldown — prevents burst of queued gap tasks from all
     # trading the same market consecutively within the cooldown window
