@@ -175,3 +175,43 @@ class TestDailyStats:
         tracker.log_trade(db, {**BASE_TRADE, "gap_id": gap_id})
         count = tracker.get_open_position_count(db)
         assert count == 2
+
+
+class TestGapCentsAndEmergencyPositions:
+    def test_trades_has_gap_cents_column(self, db):
+        gap_id = tracker.log_gap(db, BASE_GAP)
+        trade_id = tracker.log_trade(db, {
+            **BASE_TRADE,
+            "gap_id": gap_id,
+            "gap_cents": 7.5,
+        })
+        row = db.execute("SELECT gap_cents FROM trades WHERE id=?", (trade_id,)).fetchone()
+        assert row is not None
+        assert abs(row["gap_cents"] - 7.5) < 0.001
+
+    def test_emergency_positions_table_exists(self, db):
+        ep_id = tracker.log_emergency_position(db, {
+            "market_id": "test-market",
+            "platform": "polymarket",
+            "order_id": "ord_abc",
+            "side": "NO",
+            "amount_usdc": 5.0,
+        })
+        row = db.execute("SELECT * FROM emergency_positions WHERE id=?", (ep_id,)).fetchone()
+        assert row is not None
+        assert row["status"] == "open"
+        assert row["platform"] == "polymarket"
+
+    def test_log_emergency_position(self, db):
+        ep_id = tracker.log_emergency_position(db, {
+            "market_id": "test-market",
+            "platform": "kalshi",
+            "order_id": "ord_xyz",
+            "side": "YES",
+            "amount_usdc": 10.0,
+        })
+        assert ep_id > 0
+        row = db.execute("SELECT * FROM emergency_positions WHERE id=?", (ep_id,)).fetchone()
+        assert row["platform"] == "kalshi"
+        assert row["status"] == "open"
+        assert abs(row["amount_usdc"] - 10.0) < 0.001

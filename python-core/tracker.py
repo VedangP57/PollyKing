@@ -41,6 +41,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             polymarket_side TEXT,
             kalshi_side TEXT,
             amount_usdc REAL,
+            gap_cents REAL,
             expected_profit REAL,
             actual_profit REAL,
             status TEXT,
@@ -74,6 +75,18 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             updated_at TEXT DEFAULT (datetime('now'))
         );
 
+        CREATE TABLE IF NOT EXISTS emergency_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id TEXT,
+            platform TEXT,
+            order_id TEXT,
+            side TEXT,
+            amount_usdc REAL,
+            opened_at TEXT,
+            closed_at TEXT,
+            status TEXT
+        );
+
         -- Performance indexes — idempotent (must come after CREATE TABLE)
         CREATE INDEX IF NOT EXISTS idx_gaps_detected ON gaps(detected_at);
         CREATE INDEX IF NOT EXISTS idx_gaps_market_detected ON gaps(market_id, detected_at DESC);
@@ -87,6 +100,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     for migration in [
         "ALTER TABLE market_pairs ADD COLUMN outcome_count INTEGER DEFAULT 0",
         "ALTER TABLE gaps ADD COLUMN outcome_count INTEGER DEFAULT 0",
+        "ALTER TABLE trades ADD COLUMN gap_cents REAL",
     ]:
         try:
             conn.execute(migration)
@@ -146,8 +160,8 @@ def log_trade(conn: sqlite3.Connection, trade: dict) -> int:
     cur = conn.execute(
         """INSERT INTO trades
            (gap_id, polymarket_order_id, kalshi_order_id, polymarket_side, kalshi_side,
-            amount_usdc, expected_profit, status, dry_run, opened_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            amount_usdc, gap_cents, expected_profit, status, dry_run, opened_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             trade.get("gap_id"),
             trade.get("polymarket_order_id"),
@@ -155,6 +169,7 @@ def log_trade(conn: sqlite3.Connection, trade: dict) -> int:
             trade.get("polymarket_side"),
             trade.get("kalshi_side"),
             trade.get("amount_usdc"),
+            trade.get("gap_cents"),
             trade.get("expected_profit"),
             trade.get("status", "open"),
             1 if trade.get("dry_run") else 0,
@@ -163,6 +178,27 @@ def log_trade(conn: sqlite3.Connection, trade: dict) -> int:
     )
     conn.commit()
     return cur.lastrowid
+
+
+def log_emergency_position(conn: sqlite3.Connection, ep: dict) -> int:
+    """Insert an emergency position record (e.g., when one leg of a trade fails).
+    Returns the new emergency_position row id."""
+    now = datetime.now(timezone.utc).isoformat()
+    cursor = conn.execute(
+        """INSERT INTO emergency_positions
+           (market_id, platform, order_id, side, amount_usdc, opened_at, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'open')""",
+        (
+            ep.get("market_id", ""),
+            ep.get("platform", ""),
+            ep.get("order_id", ""),
+            ep.get("side", ""),
+            ep.get("amount_usdc", 0.0),
+            now,
+        ),
+    )
+    conn.commit()
+    return cursor.lastrowid
 
 
 def update_trade_result(
@@ -240,7 +276,7 @@ def get_open_live_trades(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         """SELECT t.id, g.market_id, t.polymarket_order_id, t.kalshi_order_id,
                   t.polymarket_side, t.kalshi_side,
-                  t.amount_usdc, t.expected_profit, t.opened_at
+                  t.amount_usdc, t.gap_cents, t.expected_profit, t.opened_at
            FROM trades t
            LEFT JOIN gaps g ON g.id = t.gap_id
            WHERE t.status = 'open' AND t.dry_run = 0"""
