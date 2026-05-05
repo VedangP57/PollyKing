@@ -68,11 +68,18 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             UNIQUE(token_a, token_b)
         );
 
+        CREATE TABLE IF NOT EXISTS bot_state (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+
         -- Performance indexes — idempotent (must come after CREATE TABLE)
         CREATE INDEX IF NOT EXISTS idx_gaps_detected ON gaps(detected_at);
         CREATE INDEX IF NOT EXISTS idx_gaps_market_detected ON gaps(market_id, detected_at DESC);
         CREATE INDEX IF NOT EXISTS idx_trades_opened ON trades(opened_at);
         CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
+        CREATE INDEX IF NOT EXISTS idx_trades_dry_status ON trades(dry_run, status);
     """)
     conn.commit()
 
@@ -226,3 +233,44 @@ def get_open_position_count(conn: sqlite3.Connection) -> int:
         "SELECT COUNT(*) FROM trades WHERE status='open'"
     ).fetchone()
     return row[0] if row else 0
+
+
+def get_open_live_trades(conn: sqlite3.Connection) -> list[dict]:
+    """Return all live (non-dry) open trades with their market_ids."""
+    rows = conn.execute(
+        """SELECT id, market_id, polymarket_order_id, kalshi_order_id,
+                  amount_usdc, expected_profit, opened_at
+           FROM trades
+           WHERE status = 'open' AND dry_run = 0"""
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def resolve_trade(
+    conn: sqlite3.Connection,
+    trade_id: int,
+    actual_profit: float,
+    status: str = "resolved",
+) -> None:
+    """Mark a live trade as resolved with actual profit."""
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE trades SET actual_profit=?, status=?, resolved_at=? WHERE id=?",
+        (actual_profit, status, now, trade_id),
+    )
+    conn.commit()
+
+
+def set_bot_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "INSERT INTO bot_state(key, value, updated_at) VALUES(?,?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+        (key, value, now),
+    )
+    conn.commit()
+
+
+def get_bot_state(conn: sqlite3.Connection, key: str, default: str = "") -> str:
+    row = conn.execute("SELECT value FROM bot_state WHERE key=?", (key,)).fetchone()
+    return row[0] if row else default
