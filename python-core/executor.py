@@ -3,6 +3,7 @@ import json
 from typing import Optional
 
 from kelly_engine import compute_arb_kelly_size
+from execution_policy import decide as decide_execution
 
 
 class Executor:
@@ -51,6 +52,7 @@ class Executor:
         polymarket_amount = k * price_a
         kalshi_amount = k * price_b
 
+        decision = decide_execution(gap)
         cmd = {
             "action": "execute",
             "pair_type": pair_type,
@@ -60,6 +62,8 @@ class Executor:
             "kalshi_amount": round(kalshi_amount, 4),
             "gap_cents": round(gap_cents, 4),
             "dry_run": dry_run,
+            "order_type": decision.order_type,
+            "urgency": decision.urgency,
         }
 
         await self._send_to_rust(cmd)
