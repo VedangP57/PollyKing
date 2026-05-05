@@ -40,7 +40,11 @@ CONFIG = {
     "min_bet_usdc": float(os.getenv("MIN_BET_USDC", "10")),
     "max_bet_usdc": float(os.getenv("MAX_BET_USDC", "100")),
     "max_daily_loss_usdc": float(os.getenv("MAX_DAILY_LOSS_USDC", "50")),
-    "max_open_positions": int(os.getenv("MAX_OPEN_POSITIONS", "20")),
+    "max_open_positions": (
+        int(os.getenv("MAX_OPEN_POSITIONS", "20"))
+        if os.getenv("DRY_RUN", "true").lower() != "true"
+        else 999_999
+    ),
     "db_path": os.getenv("DB_PATH", "data/trades.db"),
     "rust_binary": os.getenv("RUST_BINARY", "rust-core/target/release/arb"),
     "markets_json": os.getenv("MARKETS_JSON", "config/markets.json"),
