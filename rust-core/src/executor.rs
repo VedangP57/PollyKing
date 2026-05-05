@@ -18,16 +18,17 @@ fn dry_run_execute(cmd: ExecuteCommand) -> Result<OrderPlaced> {
 
     let total_spent = cmd.polymarket_amount + cmd.kalshi_amount;
     // combined = 1 - gap_cents/100; K contracts bought = total_spent / combined
-    // payout = K (one leg always wins); profit = K - total_spent
+    // payout = K (one leg always wins); gross = K - total_spent; net = gross - fee
     let combined = 1.0 - cmd.gap_cents / 100.0;
     let k = if combined > 0.0 { total_spent / combined } else { 0.0 };
-    let expected_profit = k - total_spent;
+    let fee = cmd.taker_fee_rate * total_spent;
+    let expected_profit = k - total_spent - fee;
 
     info!(
-        "DRY RUN | Poly {} ${:.2} | Kalshi {} ${:.2} | Gap {:.1}¢ | Expected: +${:.2}",
+        "DRY RUN | Poly {} ${:.2} | Kalshi {} ${:.2} | Gap {:.1}¢ | Fee ${:.2} | Net: +${:.2}",
         cmd.polymarket_side, cmd.polymarket_amount,
         cmd.kalshi_side, cmd.kalshi_amount,
-        cmd.gap_cents, expected_profit
+        cmd.gap_cents, fee, expected_profit
     );
 
     Ok(OrderPlaced {
@@ -54,7 +55,8 @@ async fn live_execute(cmd: ExecuteCommand, config: &AppConfig) -> Result<OrderPl
     let total_spent = cmd.polymarket_amount + cmd.kalshi_amount;
     let combined = 1.0 - cmd.gap_cents / 100.0;
     let k = if combined > 0.0 { total_spent / combined } else { 0.0 };
-    let expected_profit = k - total_spent;
+    let fee = cmd.taker_fee_rate * total_spent;
+    let expected_profit = k - total_spent - fee;
 
     Ok(OrderPlaced {
         event: "order_placed".to_string(),

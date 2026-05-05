@@ -86,6 +86,8 @@ pub struct ExecuteCommand {
     #[serde(default)]
     pub gap_cents: f64,
     pub dry_run: bool,
+    #[serde(default)]
+    pub taker_fee_rate: f64,
 }
 
 fn default_cross_platform() -> String {

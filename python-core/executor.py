@@ -62,6 +62,7 @@ class Executor:
             "kalshi_amount": round(kalshi_amount, 4),
             "gap_cents": round(gap_cents, 4),
             "dry_run": dry_run,
+            "taker_fee_rate": self.config.get("ev_taker_fee_rate", 0.02),
             "order_type": decision.order_type,
             "urgency": decision.urgency,
         }
