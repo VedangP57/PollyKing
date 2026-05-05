@@ -105,8 +105,9 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         try:
             conn.execute(migration)
             conn.commit()
-        except Exception:
-            pass  # Column already exists
+        except sqlite3.OperationalError as e:
+            if "duplicate column name" not in str(e):
+                raise
 
 
 _GAP_LOG_COOLDOWN_MINUTES = 5  # log the same market gap at most once every 5 minutes

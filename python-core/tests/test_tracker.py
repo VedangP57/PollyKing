@@ -47,6 +47,7 @@ class TestInitDb:
         assert "gaps" in names
         assert "trades" in names
         assert "market_pairs" in names
+        assert "emergency_positions" in names
 
     def test_idempotent(self):
         with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
