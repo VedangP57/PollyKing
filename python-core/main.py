@@ -2,7 +2,9 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -10,11 +12,11 @@ from dotenv import load_dotenv
 import notifier
 import tracker
 from detector import GapDetector
-from executor import Executor
+from two_leg_executor import TwoLegExecutor
 from matcher import Matcher
 from reconciler import Reconciler
 from bayes_engine import BayesEngine
-from risk_engine import RiskEngine, KillSwitch
+from risk_engine import RiskEngine
 
 load_dotenv()
 
@@ -23,7 +25,7 @@ load_dotenv()
 #
 #   Polymarket:
 #     - Price feed + market discovery: fully public, no key needed
-#     - Order placement: POLYMARKET_API_KEY + POLYMARKET_PRIVATE_KEY (live only)
+#     - Order placement: POLYMARKET_PRIVATE_KEY + POLYMARKET_WALLET_ADDRESS (live only)
 #
 #   Kalshi:
 #     - Market list + price data: PUBLIC — https://api.elections.kalshi.com, NO key needed
@@ -55,6 +57,13 @@ CONFIG = {
     "kelly_fraction": float(os.getenv("KELLY_FRACTION", "0.25")),
     "reconcile_interval_s": float(os.getenv("RECONCILE_INTERVAL_S", "300.0")),
     "max_category_exposure_usdc": float(os.getenv("MAX_CATEGORY_EXPOSURE_USDC", "200.0")),
+    "cross_platform_min_gap_cents": float(os.getenv("CROSS_PLATFORM_MIN_GAP_CENTS", "5")),
+    "internal_min_gap_cents": float(os.getenv("INTERNAL_MIN_GAP_CENTS", "8")),
+    "polymarket_private_key": os.getenv("POLYMARKET_PRIVATE_KEY", ""),
+    "polymarket_wallet_address": os.getenv("POLYMARKET_WALLET_ADDRESS", ""),
+    "kalshi_api_key": os.getenv("KALSHI_API_KEY", ""),
+    "kalshi_api_secret": os.getenv("KALSHI_API_SECRET", ""),
+    "kalshi_api_url": os.getenv("KALSHI_API_URL", "https://api.elections.kalshi.com/trade-api/v2"),
 }
 
 rust_process = None
@@ -78,6 +87,36 @@ signal.signal(signal.SIGINT, handle_sigint)
 async def main():
     global rust_process
 
+    # Run backfill if markets.json is >24 hours old or missing cross-platform pairs
+    markets_path = Path(CONFIG["markets_json"])
+    needs_backfill = False
+    if not markets_path.exists():
+        needs_backfill = True
+    else:
+        mtime = datetime.fromtimestamp(markets_path.stat().st_mtime, tz=timezone.utc)
+        if datetime.now(timezone.utc) - mtime > timedelta(hours=24):
+            needs_backfill = True
+        else:
+            try:
+                _mdata = json.loads(markets_path.read_text())
+                has_cross = any(p.get("pair_type") == "cross_platform" for p in _mdata.get("pairs", []))
+                if not has_cross:
+                    needs_backfill = True
+            except Exception:
+                needs_backfill = True
+
+    if needs_backfill:
+        notifier.logger.info("markets.json is stale or missing cross-platform pairs — running backfill...")
+        result = subprocess.run(
+            ["python", "scripts/backfill_matches.py"],
+            capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent),
+        )
+        if result.returncode != 0:
+            notifier.logger.warning(f"Backfill failed: {result.stderr[:200]}")
+        else:
+            notifier.logger.info("Backfill complete")
+
     # Determine mode from the actual pairs in markets.json, not from env key presence
     try:
         _pairs_data = json.loads(Path(CONFIG["markets_json"]).read_text()).get("pairs", [])
@@ -99,6 +138,12 @@ async def main():
         pairs = _data.get("pairs", _data.get("manual_pairs", []))
     except (FileNotFoundError, json.JSONDecodeError):
         pairs = []
+
+    # fee_rate_map: market_id → fee_rate for enriching gap events with per-pair fee
+    fee_rate_map: dict[str, float] = {
+        p.get("market_id", p.get("token_a", "")): p.get("fee_rate", 0.04)
+        for p in pairs
+    }
 
     high = sum(1 for p in pairs if p.get("confidence") == "high")
     medium = sum(1 for p in pairs if p.get("confidence") == "medium")
@@ -122,18 +167,18 @@ async def main():
 
     stdout_queue: asyncio.Queue = asyncio.Queue()
 
-    executor = Executor(CONFIG, rust_process.stdin, stdout_queue)
+    executor = TwoLegExecutor(CONFIG, db_conn)
 
     reconciler = Reconciler(CONFIG, db_conn)
     asyncio.create_task(reconciler.run_forever())
 
     asyncio.create_task(_read_stderr(rust_process.stderr))
-    asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn, bayes_engine))
+    asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn, bayes_engine, fee_rate_map))
 
     await rust_process.wait()
 
 
-async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, db_conn, bayes_engine: BayesEngine):
+async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, db_conn, bayes_engine: BayesEngine, fee_rate_map: dict):
     async for line in stdout:
         text = line.decode().strip()
         if not text:
@@ -147,18 +192,18 @@ async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, 
         event_type = event.get("event")
 
         if event_type == "gap_detected":
-            # Fire-and-forget: _handle_gap waits on stdout_queue for the Rust
-            # confirmation. If we awaited it directly here, _read_stdout would
-            # block and never read the confirmation line from Rust → deadlock.
-            asyncio.create_task(_handle_gap(event, detector, executor, db_conn, stdout_queue, bayes_engine))
-        elif event_type == "order_placed":
-            await stdout_queue.put(event)
+            # Fire-and-forget: _handle_gap calls TwoLegExecutor directly.
+            # We do not block here so _read_stdout can keep draining Rust stdout.
+            asyncio.create_task(_handle_gap(event, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map))
 
 
-async def _handle_gap(gap: dict, detector: GapDetector, executor: Executor, db_conn, stdout_queue, bayes_engine: BayesEngine):
+async def _handle_gap(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict):
     notifier.gap_detected(gap)
 
     market_id = gap["market_id"]
+
+    # Attach per-pair fee_rate so detector and EV gate use the correct rate
+    gap["fee_rate"] = fee_rate_map.get(market_id, 0.04)
 
     # Update Bayesian posterior for this market
     poly_price = gap.get("polymarket_price", 0.5)
@@ -188,7 +233,7 @@ async def _handle_gap(gap: dict, detector: GapDetector, executor: Executor, db_c
     confirmation = await executor.execute(gap)
 
     if not confirmation:
-        notifier.logger.warning(f"No confirmation from Rust for {market_id} — gap logged but trade skipped")
+        notifier.logger.warning(f"Execution failed for {market_id} — gap logged, no trade")
         return
 
     pair_type = gap.get("pair_type", "cross_platform")
@@ -202,8 +247,9 @@ async def _handle_gap(gap: dict, detector: GapDetector, executor: Executor, db_c
         "polymarket_amount": confirmation.get("total_spent", 0) / 2,
         "kalshi_amount": confirmation.get("total_spent", 0) / 2,
         "amount_usdc": confirmation.get("total_spent"),
+        "gap_cents": confirmation.get("gap_cents"),
         "expected_profit": confirmation.get("expected_profit"),
-        "dry_run": confirmation.get("dry_run", True),
+        "dry_run": CONFIG.get("dry_run", True),
     }
 
     notifier.trade_executed(trade)
