@@ -325,6 +325,7 @@ pub fn get_risk_state(db: &str) -> Result<RiskState> {
     let conn = Connection::open(db)?;
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.busy_timeout(std::time::Duration::from_millis(3000))?;
+    conn.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;")?;
 
     let mut kill_switches = std::collections::HashMap::new();
     let switch_names = ["daily_drawdown", "api_health", "model_drift", "liquidity"];
@@ -343,7 +344,7 @@ pub fn get_risk_state(db: &str) -> Result<RiskState> {
     let daily_loss: f64 = conn
         .query_row(
             "SELECT COALESCE(ABS(SUM(actual_profit)), 0.0) FROM trades \
-             WHERE opened_at > date('now') AND status IN ('loss') AND dry_run=0",
+             WHERE opened_at > date('now') AND status='loss' AND dry_run=0",
             [],
             |row| row.get(0),
         )
@@ -364,6 +365,7 @@ pub fn get_calibration_stats(db: &str) -> Result<CalibrationStats> {
     let conn = Connection::open(db)?;
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.busy_timeout(std::time::Duration::from_millis(3000))?;
+    conn.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;")?;
 
     let trade_count: i64 = conn
         .query_row(
@@ -390,7 +392,7 @@ pub fn get_calibration_stats(db: &str) -> Result<CalibrationStats> {
             |row| row.get(0),
         )
         .unwrap_or(0);
-    let win_rate = if trade_count > 0 { wins as f64 / trade_count as f64 } else { 0.0 };
+    let win_rate = wins as f64 / trade_count as f64;
 
     let ev_error: Option<f64> = conn
         .query_row(
@@ -413,6 +415,7 @@ pub fn get_portfolio_breakdown(db: &str) -> Result<Vec<CategoryBreakdown>> {
     let conn = Connection::open(db)?;
     conn.execute_batch("PRAGMA journal_mode=WAL;")?;
     conn.busy_timeout(std::time::Duration::from_millis(3000))?;
+    conn.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA temp_store=MEMORY;")?;
 
     let rows = conn.prepare(
         "SELECT market_id, actual_profit, expected_profit, status FROM trades \
