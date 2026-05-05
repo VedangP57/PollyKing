@@ -1,0 +1,86 @@
+import sys
+import time
+from loguru import logger
+
+# Rate-limit noisy logs — same gap+reason only printed once per cooldown window
+_skip_last: dict[str, float] = {}
+_gap_last: dict[str, float] = {}
+_SKIP_COOLDOWN = 60.0   # seconds between duplicate SKIP lines
+_GAP_COOLDOWN = 10.0    # seconds between duplicate GAP lines for same market
+
+logger.remove()
+logger.add(
+    sys.stdout,
+    format="<dim>[{time:HH:mm:ss}]</dim> <level>{level:<5}</level> | {message}",
+    colorize=True,
+    level="DEBUG",
+)
+
+
+def startup(dry_run: bool, pair_count: int, high: int, medium: int, low: int) -> None:
+    mode = "DRY RUN" if dry_run else "LIVE"
+    logger.info(f"Bot started. Mode={mode}")
+    logger.info(
+        f"{pair_count} market pairs loaded ({high} high confidence, {medium} medium, {low} low)"
+    )
+
+
+def ws_connected(platform: str) -> None:
+    logger.info(f"WebSocket connected: {platform}")
+
+
+def ws_disconnected(platform: str) -> None:
+    logger.warning(f"WebSocket disconnected: {platform}")
+
+
+def gap_detected(gap: dict) -> None:
+    market_id = gap['market_id']
+    now = time.monotonic()
+    if now - _gap_last.get(market_id, 0) < _GAP_COOLDOWN:
+        return  # Same gap still active — don't spam terminal every second
+    _gap_last[market_id] = now
+    logger.opt(colors=True).info(
+        f"<yellow>GAP</yellow>   | {market_id} "
+        f"| Poly: {gap['polymarket_price']:.2f} "
+        f"| Kalshi: {gap['kalshi_price']:.2f} "
+        f"| Gap: {gap['gap_cents']:.1f}c "
+        f"| Conf: {gap.get('confidence', 'medium').upper()}"
+    )
+
+
+def gap_rejected(market_id: str, reason: str) -> None:
+    key = f"{market_id}:{reason[:40]}"
+    now = time.monotonic()
+    if now - _skip_last.get(key, 0) < _SKIP_COOLDOWN:
+        return  # Suppress duplicate — same market+reason within cooldown window
+    _skip_last[key] = now
+    logger.opt(colors=True).debug(
+        f"<dim>SKIP</dim>  | {market_id} | {reason}"
+    )
+
+
+def gap_valid(market_id: str) -> None:
+    logger.opt(colors=True).info(
+        f"<green>VALID</green> | {market_id} | Gap stable. Executing..."
+    )
+
+
+def trade_executed(trade: dict) -> None:
+    dry_tag = " (DRY RUN)" if trade.get("dry_run") else ""
+    logger.opt(colors=True).info(
+        f"<cyan>TRADE</cyan> | {trade.get('polymarket_side')} Poly ${trade.get('polymarket_amount', 0):.2f} "
+        f"| {trade.get('kalshi_side')} Kalshi ${trade.get('kalshi_amount', 0):.2f} "
+        f"| Expected: +${trade.get('expected_profit', 0):.2f}{dry_tag}"
+    )
+
+
+def trade_logged(trade_id: int) -> None:
+    logger.opt(colors=True).info(
+        f"<dim>LOG</dim>   | Trade #{trade_id} written to trades.db"
+    )
+
+
+def daily_summary(trade_count: int, simulated_profit: float) -> None:
+    logger.info(
+        f"Daily summary: {trade_count} trades | Simulated profit: ${simulated_profit:.2f}"
+    )

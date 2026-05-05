@@ -1,0 +1,131 @@
+from collections import defaultdict, deque
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+import json
+
+import sqlite3
+from tracker import get_daily_loss, get_open_position_count
+
+
+class GapDetector:
+    def __init__(self, config: dict, db_conn: sqlite3.Connection):
+        self.config = config
+        self.db_conn = db_conn
+        # market_id -> deque of gap_cents (recent history, max 10, O(1) append+pop)
+        self._history: dict[str, deque] = defaultdict(lambda: deque(maxlen=10))
+        self._stale_flags: dict[str, bool] = {}
+        # Load blacklisted event IDs from markets.json
+        self._blacklisted_events: set[str] = self._load_blacklist(config.get("markets_json", "config/markets.json"))
+
+    @staticmethod
+    def _load_blacklist(markets_json_path: str) -> set[str]:
+        try:
+            data = json.loads(Path(markets_json_path).read_text())
+            return set(str(x) for x in data.get("blacklisted_event_ids", []))
+        except (FileNotFoundError, json.JSONDecodeError):
+            return set()
+
+    def validate(self, gap: dict) -> tuple[bool, str]:
+        market_id = gap["market_id"]
+        poly_price = gap["polymarket_price"]
+        kalshi_price = gap["kalshi_price"]
+        gap_cents = gap["gap_cents"]
+
+        # Check 0a: Blacklisted event gate
+        # market_id format for internal pairs: "eventId::tokenA-tokenB"
+        event_id = market_id.split("::")[0] if "::" in market_id else ""
+        if event_id and event_id in self._blacklisted_events:
+            return False, f"Event {event_id} is blacklisted"
+
+        # Check 0b: Binary-only gate — reject multi-outcome markets
+        # Only internal negRisk pairs need this check (cross_platform is always binary).
+        # outcome_count=0 means unknown — reject by default (safe over sorry).
+        pair_type = gap.get("pair_type", "cross_platform")
+        if pair_type == "internal":
+            # Rust Gap struct emits "polymarket_token" and "kalshi_ticker" (not "token_a"/"token_b")
+            # Fall back to token_a/token_b for forward-compat if field names ever change
+            token_a = gap.get("polymarket_token", gap.get("token_a", ""))
+            token_b = gap.get("kalshi_ticker", gap.get("token_b", ""))
+            row = None
+            if token_a and token_b:
+                row = self.db_conn.execute(
+                    "SELECT outcome_count FROM market_pairs WHERE token_a=? AND token_b=?",
+                    (token_a, token_b),
+                ).fetchone()
+            outcome_count = row[0] if row else 0
+            if outcome_count == 0:
+                return False, "Outcome count unknown — pair not in market_pairs table"
+            if outcome_count != 2:
+                return False, f"REJECTED: multi-outcome market ({outcome_count} outcomes, need exactly 2)"
+
+        # Check 1: Combined cost leaves room for fees (< $0.95 combined)
+        # Cross-platform: buy Poly NO + Kalshi YES → combined = (1-poly) + kalshi
+        # Internal negRisk: buy both YES tokens     → combined = poly + kalshi
+        if pair_type == "internal":
+            combined = poly_price + kalshi_price
+        else:
+            combined = (1.0 - poly_price) + kalshi_price
+        if combined >= 0.95:
+            return False, f"Combined price {combined:.3f} >= 0.95 (no profit after fees)"
+
+        # Check 2: Gap must be stable for 3+ consecutive updates
+        history = self._history[market_id]
+        history.append(gap_cents)  # deque(maxlen=10) auto-evicts oldest — O(1)
+
+        if len(history) < 3:
+            return False, f"Gap too new — only {len(history)} update(s), need 3"
+
+        recent = history[-3:]
+        if not _is_stable(recent):
+            return False, f"Gap unstable — recent: {recent}"
+
+        # Check 3: Stale feed check
+        if self._stale_flags.get(market_id, False):
+            return False, "Feed marked stale — skipping"
+
+        # Check 4: Market resolution proximity (requires resolution timestamp in gap)
+        closes_at = gap.get("closes_at")
+        if closes_at:
+            try:
+                close_dt = datetime.fromisoformat(closes_at.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                minutes_remaining = (close_dt - now).total_seconds() / 60
+                if minutes_remaining < 10:
+                    return False, f"Market closes in {minutes_remaining:.1f} min (< 10 min)"
+            except (ValueError, TypeError):
+                pass
+
+        # Check 5: Daily loss limit
+        daily_loss = get_daily_loss(self.db_conn)
+        max_loss = self.config.get("max_daily_loss_usdc", 50.0)
+        if daily_loss >= max_loss:
+            return False, f"Daily loss limit hit: ${daily_loss:.2f} >= ${max_loss:.2f}"
+
+        # Check 6: Open position count
+        open_positions = get_open_position_count(self.db_conn)
+        max_positions = self.config.get("max_open_positions", 5)
+        if open_positions >= max_positions:
+            return False, f"Max open positions reached: {open_positions}/{max_positions}"
+
+        # Check 7: Confidence level (never auto-execute low confidence)
+        confidence = gap.get("confidence", "medium")
+        if confidence == "low":
+            return False, "Low confidence match — log only, no execution"
+
+        return True, "valid"
+
+    def mark_stale(self, market_id: str) -> None:
+        self._stale_flags[market_id] = True
+
+    def clear_stale(self, market_id: str) -> None:
+        self._stale_flags[market_id] = False
+
+    def reset_history(self, market_id: str) -> None:
+        self._history[market_id] = deque(maxlen=10)
+
+
+def _is_stable(recent: list[float], tolerance: float = 2.0) -> bool:
+    if len(recent) < 2:
+        return False
+    return max(recent) - min(recent) <= tolerance
