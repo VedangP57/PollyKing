@@ -79,9 +79,13 @@ async def test_both_legs_succeed_cross_platform(config, db, cross_platform_gap):
                      "ticker": "KXTEST-25DEC", "count": 11}
 
     with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
-         patch("two_leg_executor.KalshiExecutor") as MockKalshi:
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.05), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.02):
         MockPoly.return_value.place_order = AsyncMock(return_value=poly_result)
+        MockPoly.return_value.get_order_status = AsyncMock(return_value="matched")
         MockKalshi.return_value.place_order = AsyncMock(return_value=kalshi_result)
+        MockKalshi.return_value.get_order_status = AsyncMock(return_value="matched")
 
         ex = TwoLegExecutor(config, db)
         result = await ex.execute(cross_platform_gap, bet_size=10.0)
@@ -129,9 +133,13 @@ async def test_direction2_gap_sells_kalshi(config, db):
                      "ticker": "KXTEST-25DEC", "count": 10}
 
     with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
-         patch("two_leg_executor.KalshiExecutor") as MockKalshi:
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.05), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.02):
         MockPoly.return_value.place_order = AsyncMock(return_value=poly_result)
+        MockPoly.return_value.get_order_status = AsyncMock(return_value="matched")
         MockKalshi.return_value.place_order = AsyncMock(return_value=kalshi_result)
+        MockKalshi.return_value.get_order_status = AsyncMock(return_value="matched")
 
         ex = TwoLegExecutor(config, db)
         result = await ex.execute(rev_gap, bet_size=10.0)
@@ -148,10 +156,12 @@ async def test_polymarket_fills_kalshi_fails_emergency_close(config, db, cross_p
                    "token_id": "no_token_hex", "amount_usdc": 5.0}
 
     with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
-         patch("two_leg_executor.KalshiExecutor") as MockKalshi:
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.05), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.02):
         MockPoly.return_value.place_order = AsyncMock(return_value=poly_result)
+        MockPoly.return_value.get_order_status = AsyncMock(return_value="matched")
         MockPoly.return_value.close_order = AsyncMock()
-        MockPoly.return_value.get_balance = AsyncMock(return_value=1000.0)
         MockKalshi.return_value.place_order = AsyncMock(side_effect=ExecutorError("kalshi fail"))
 
         ex = TwoLegExecutor(config, db)
@@ -170,9 +180,12 @@ async def test_kalshi_fills_polymarket_fails_emergency_close(config, db, cross_p
                      "ticker": "KXTEST-25DEC", "count": 11}
 
     with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
-         patch("two_leg_executor.KalshiExecutor") as MockKalshi:
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.05), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.02):
         MockPoly.return_value.place_order = AsyncMock(side_effect=ExecutorError("poly fail"))
         MockKalshi.return_value.place_order = AsyncMock(return_value=kalshi_result)
+        MockKalshi.return_value.get_order_status = AsyncMock(return_value="matched")
         MockKalshi.return_value.close_order = AsyncMock()
 
         ex = TwoLegExecutor(config, db)
@@ -235,6 +248,80 @@ async def test_dry_run_expected_profit_is_positive(db, cross_platform_gap):
 
 
 @pytest.mark.asyncio
+async def test_timeout_on_poly_fill_triggers_cancel(config, db, cross_platform_gap):
+    """If Polymarket order doesn't fill within timeout, it gets canceled."""
+    config["dry_run"] = False
+    poly_result = {"order_id": "poly_slow", "status": "open", "platform": "polymarket",
+                   "token_id": "no_token_hex", "amount_usdc": 5.0}
+    kalshi_result = {"order_id": "kal_ok", "status": "matched", "platform": "kalshi",
+                     "ticker": "KXTEST-25DEC", "count": 11}
+
+    with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.1), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.05):
+        MockPoly.return_value.place_order = AsyncMock(return_value=poly_result)
+        MockPoly.return_value.get_order_status = AsyncMock(return_value="open")  # never fills
+        MockPoly.return_value.cancel_order = AsyncMock()
+        MockPoly.return_value.close_order = AsyncMock()
+        MockKalshi.return_value.place_order = AsyncMock(return_value=kalshi_result)
+        MockKalshi.return_value.get_order_status = AsyncMock(return_value="matched")
+        MockKalshi.return_value.close_order = AsyncMock()
+
+        ex = TwoLegExecutor(config, db)
+        result = await ex.execute(cross_platform_gap, bet_size=10.0)
+
+    assert result is None
+    MockPoly.return_value.cancel_order.assert_called_once_with("poly_slow")
+
+
+@pytest.mark.asyncio
+async def test_both_legs_fill_returns_confirmation(config, db, cross_platform_gap):
+    """Both legs fill → returns confirmation dict."""
+    config["dry_run"] = False
+    poly_result = {"order_id": "poly_ok", "status": "open", "platform": "polymarket",
+                   "token_id": "no_token_hex", "amount_usdc": 5.0}
+    kalshi_result = {"order_id": "kal_ok", "status": "resting", "platform": "kalshi",
+                     "ticker": "KXTEST-25DEC", "count": 11}
+
+    with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.1), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.05):
+        MockPoly.return_value.place_order = AsyncMock(return_value=poly_result)
+        MockPoly.return_value.get_order_status = AsyncMock(return_value="matched")
+        MockKalshi.return_value.place_order = AsyncMock(return_value=kalshi_result)
+        MockKalshi.return_value.get_order_status = AsyncMock(return_value="matched")
+
+        ex = TwoLegExecutor(config, db)
+        result = await ex.execute(cross_platform_gap, bet_size=10.0)
+
+    assert result is not None
+    assert result["total_spent"] == 10.0
+
+
+@pytest.mark.asyncio
+async def test_dry_run_skips_fill_verification(db, cross_platform_gap):
+    """Dry run must never call get_order_status."""
+    dry_config = {
+        "dry_run": True,
+        "bankroll_usdc": 500.0, "kelly_fraction": 0.25,
+        "min_bet_usdc": 10.0, "max_bet_usdc": 100.0,
+        "polymarket_private_key": "", "polymarket_wallet_address": "",
+        "kalshi_api_key": "", "kalshi_api_secret": "",
+    }
+    with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi:
+        ex = TwoLegExecutor(dry_config, db)
+        result = await ex.execute(cross_platform_gap, bet_size=10.0)
+
+    assert result is not None
+    assert result["dry_run"] is True
+    MockPoly.return_value.get_order_status.assert_not_called()
+    MockKalshi.return_value.get_order_status.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_internal_pair_uses_polymarket_for_both_legs(config, db, internal_gap):
     poly_result_a = {"order_id": "poly_a", "status": "matched", "platform": "polymarket",
                      "token_id": "tokenA_hex", "amount_usdc": 5.0}
@@ -242,10 +329,13 @@ async def test_internal_pair_uses_polymarket_for_both_legs(config, db, internal_
                      "token_id": "tokenB_hex", "amount_usdc": 4.5}
 
     with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
-         patch("two_leg_executor.KalshiExecutor"):
+         patch("two_leg_executor.KalshiExecutor"), \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.05), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.02):
         MockPoly.return_value.place_order = AsyncMock(
             side_effect=[poly_result_a, poly_result_b]
         )
+        MockPoly.return_value.get_order_status = AsyncMock(return_value="matched")
 
         ex = TwoLegExecutor(config, db)
         result = await ex.execute(internal_gap, bet_size=10.0)

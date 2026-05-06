@@ -10,6 +10,9 @@ from tracker import log_emergency_position
 
 log = logging.getLogger(__name__)
 
+_FILL_POLL_INTERVAL = 2.0   # seconds between status polls
+_FILL_TIMEOUT = 30.0        # seconds before treating order as unfilled
+
 
 class TwoLegExecutor:
     """Fires both legs of an arb trade concurrently.
@@ -26,6 +29,26 @@ class TwoLegExecutor:
         self._db = db_conn
         self._poly = PolymarketExecutor(config)
         self._kalshi = KalshiExecutor(config)
+
+    async def _wait_for_fill(self, platform: str, order_id: str) -> bool:
+        """Poll order status until filled or timeout. Returns True if filled."""
+        deadline = asyncio.get_event_loop().time() + _FILL_TIMEOUT
+        while asyncio.get_event_loop().time() < deadline:
+            try:
+                if platform == "polymarket":
+                    status = await self._poly.get_order_status(order_id)
+                elif platform == "kalshi":
+                    status = await self._kalshi.get_order_status(order_id)
+                else:
+                    return False
+                if status == "matched":
+                    return True
+                if status in ("canceled", "cancelled"):
+                    return False
+            except Exception as e:
+                log.debug("Fill poll error for %s %s: %s", platform, order_id, e)
+            await asyncio.sleep(_FILL_POLL_INTERVAL)
+        return False
 
     def _compute_bet_size(self, gap: dict) -> float:
         bankroll = self._config.get("bankroll_usdc", 500.0)
@@ -170,6 +193,37 @@ class TwoLegExecutor:
 
         a_ok = not isinstance(result_a, Exception)
         b_ok = not isinstance(result_b, Exception)
+
+        # Verify fills for legs that returned a response (accepted ≠ filled)
+        if a_ok and not self._config.get("dry_run", True):
+            poly_id = result_a.get("order_id", "")
+            if poly_id:
+                filled = await self._wait_for_fill("polymarket", poly_id)
+                if not filled:
+                    log.warning(
+                        "Polymarket order %s did not fill in %ss — canceling",
+                        poly_id, _FILL_TIMEOUT,
+                    )
+                    try:
+                        await self._poly.cancel_order(poly_id)
+                    except Exception:
+                        pass
+                    a_ok = False
+
+        if b_ok and kalshi_count is not None and not self._config.get("dry_run", True):
+            kalshi_id = result_b.get("order_id", "")
+            if kalshi_id:
+                filled = await self._wait_for_fill("kalshi", kalshi_id)
+                if not filled:
+                    log.warning(
+                        "Kalshi order %s did not fill in %ss — canceling",
+                        kalshi_id, _FILL_TIMEOUT,
+                    )
+                    try:
+                        await self._kalshi.cancel_order(kalshi_id)
+                    except Exception:
+                        pass
+                    b_ok = False
 
         if a_ok and b_ok:
             fee_rate = gap.get("fee_rate", 0.04)
