@@ -57,10 +57,11 @@ CONFIG = {
     "kelly_fraction": float(os.getenv("KELLY_FRACTION", "0.25")),
     "reconcile_interval_s": float(os.getenv("RECONCILE_INTERVAL_S", "300.0")),
     "max_category_exposure_usdc": float(os.getenv("MAX_CATEGORY_EXPOSURE_USDC", "200.0")),
-    "cross_platform_min_gap_cents": float(os.getenv("CROSS_PLATFORM_MIN_GAP_CENTS", "5")),
+    "cross_platform_min_gap_cents": float(os.getenv("CROSS_PLATFORM_MIN_GAP_CENTS", "10")),
     "internal_min_gap_cents": float(os.getenv("INTERNAL_MIN_GAP_CENTS", "8")),
     "polymarket_private_key": os.getenv("POLYMARKET_PRIVATE_KEY", ""),
     "polymarket_wallet_address": os.getenv("POLYMARKET_WALLET_ADDRESS", ""),
+    "polymarket_signature_type": int(os.getenv("POLYMARKET_SIGNATURE_TYPE", "0")),
     "kalshi_api_key": os.getenv("KALSHI_API_KEY", ""),
     "kalshi_api_secret": os.getenv("KALSHI_API_SECRET", ""),
     "kalshi_api_url": os.getenv("KALSHI_API_URL", "https://api.elections.kalshi.com/trade-api/v2"),
@@ -72,7 +73,11 @@ rust_process = None
 # Prevents a burst of queued gap tasks from all trading the same market consecutively
 import time as _time
 _last_traded: dict[str, float] = {}
-_TRADE_COOLDOWN = 60.0  # seconds before same market can trade again
+_TRADE_COOLDOWN = 300.0  # seconds before same market can trade again (secondary guard)
+
+# Semaphore: max concurrent live API calls — prevents rate limiting on both exchanges
+_GAP_SEMAPHORE: asyncio.Semaphore | None = None
+_MAX_CONCURRENT_EXECUTIONS = 3
 
 
 def handle_sigint(sig, frame):
@@ -165,6 +170,9 @@ async def main():
         env={**os.environ, "MARKETS_JSON": CONFIG["markets_json"]},
     )
 
+    global _GAP_SEMAPHORE
+    _GAP_SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT_EXECUTIONS)
+
     stdout_queue: asyncio.Queue = asyncio.Queue()
 
     executor = TwoLegExecutor(CONFIG, db_conn)
@@ -198,6 +206,11 @@ async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, 
 
 
 async def _handle_gap(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict):
+    async with _GAP_SEMAPHORE:
+        await _handle_gap_inner(gap, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map)
+
+
+async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict):
     notifier.gap_detected(gap)
 
     market_id = gap["market_id"]
@@ -211,8 +224,12 @@ async def _handle_gap(gap: dict, detector: GapDetector, executor: TwoLegExecutor
     posterior = bayes_engine.get_posterior(market_id)
     gap["p_model"] = posterior
 
-    # Per-market cooldown — prevents burst of queued gap tasks from all
-    # trading the same market consecutively within the cooldown window
+    # Primary guard: skip if a position is already open for this market (DB-persisted)
+    if tracker.has_open_trade(db_conn, market_id):
+        return
+
+    # Secondary guard: in-memory cooldown prevents burst of queued tasks from
+    # all firing immediately after a position just closed
     now = _time.monotonic()
     if now - _last_traded.get(market_id, 0) < _TRADE_COOLDOWN:
         return
