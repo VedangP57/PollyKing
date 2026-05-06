@@ -125,3 +125,36 @@ class TestManualOverrides:
         kalshi = [{"ticker": "FED-LOW", "title": "Fed low"}]
         pairs = matcher.match(poly, kalshi)
         assert pairs[0].confidence == "low"
+
+
+class TestNoTokenExtraction:
+    def test_extract_no_token_returns_second_clob_id(self):
+        from matcher import _extract_no_token
+        market = {"clobTokenIds": '["yes_abc", "no_xyz"]'}
+        assert _extract_no_token(market) == "no_xyz"
+
+    def test_extract_no_token_missing_returns_empty(self):
+        from matcher import _extract_no_token
+        assert _extract_no_token({}) == ""
+
+    def test_extract_no_token_single_id_returns_empty(self):
+        from matcher import _extract_no_token
+        market = {"clobTokenIds": '["yes_only"]'}
+        assert _extract_no_token(market) == ""
+
+    def test_market_pair_has_no_token_a(self):
+        p = MarketPair(
+            polymarket_slug="s", kalshi_ticker="k", market_id="m",
+            confidence="high", match_method="exact",
+            token_a="yes_tok", no_token_a="no_tok", token_b="kal",
+        )
+        assert p.no_token_a == "no_tok"
+
+    def test_match_populates_no_token_a(self):
+        matcher = make_matcher()
+        poly = [{"slug": "exact-slug-match", "question": "Some question",
+                 "clobTokenIds": '["yes_hex_123", "no_hex_456"]'}]
+        kalshi = [{"ticker": "exact-slug-match", "title": "Some question"}]
+        pairs = matcher.match(poly, kalshi)
+        assert len(pairs) == 1
+        assert pairs[0].no_token_a == "no_hex_456"

@@ -17,8 +17,9 @@ class MarketPair:
     confidence: str
     match_method: str
     pair_type: str = "cross_platform"  # "cross_platform" or "internal"
-    token_a: str = ""   # Polymarket YES token hex ID
-    token_b: str = ""   # Kalshi ticker (cross) or second Poly YES token (internal)
+    token_a: str = ""       # Polymarket YES token hex ID
+    no_token_a: str = ""    # Polymarket NO token hex ID (cross-platform dir1: buy Poly NO)
+    token_b: str = ""       # Kalshi ticker (cross) or second Poly YES token (internal)
     polymarket_title: str = ""
     kalshi_title: str = ""
     gamma_id_a: str = ""  # Gamma market ID for token_a (used for REST price polling)
@@ -168,6 +169,7 @@ class Matcher:
         poly_slug = poly.get("slug", poly.get("conditionId", ""))
         poly_title = _normalize(poly.get("question", poly.get("title", "")))
         token_a = _extract_yes_token(poly)
+        no_token_a = _extract_no_token(poly)
 
         # Layer 3: manual overrides (checked first for priority)
         for override in self.manual_pairs:
@@ -182,6 +184,7 @@ class Matcher:
                         match_method="manual",
                         pair_type="cross_platform",
                         token_a=token_a or poly_slug,
+                        no_token_a=no_token_a,
                         token_b=ticker,
                         polymarket_title=poly_title,
                     )
@@ -203,6 +206,7 @@ class Matcher:
                     match_method="exact",
                     pair_type="cross_platform",
                     token_a=token_a or poly_slug,
+                    no_token_a=no_token_a,
                     token_b=ticker,
                     polymarket_title=poly_title,
                     kalshi_title=kalshi_title,
@@ -224,6 +228,7 @@ class Matcher:
                         match_method="fuzzy",
                         pair_type="cross_platform",
                         token_a=token_a or poly_slug,
+                        no_token_a=no_token_a,
                         token_b=ticker,
                         polymarket_title=poly_title,
                         kalshi_title=kalshi_title,
@@ -269,6 +274,23 @@ def _extract_yes_token(market: dict) -> str:
             ids = json.loads(raw) if isinstance(raw, str) else raw
             if ids:
                 return str(ids[0])
+        except (json.JSONDecodeError, IndexError):
+            pass
+    return ""
+
+
+def _extract_no_token(market: dict) -> str:
+    """Extract the NO outcome token ID from a Gamma API market.
+
+    Gamma API returns clobTokenIds as a JSON-encoded string: '["yes_id", "no_id"]'.
+    Index 1 is always the NO token.
+    """
+    raw = market.get("clobTokenIds", "")
+    if raw:
+        try:
+            ids = json.loads(raw) if isinstance(raw, str) else raw
+            if len(ids) > 1:
+                return str(ids[1])
         except (json.JSONDecodeError, IndexError):
             pass
     return ""

@@ -25,12 +25,13 @@ pub enum PairType {
 }
 
 // All pairs use token_a / token_b regardless of mode.
-// Cross-platform: token_a = Polymarket YES hex ID, token_b = Kalshi ticker
-// Internal:       token_a = Polymarket YES hex ID, token_b = second Polymarket YES hex ID
+// Cross-platform: token_a = Polymarket YES hex ID, no_token_a = Polymarket NO hex ID, token_b = Kalshi ticker
+// Internal:       token_a = Polymarket YES hex ID, no_token_a = "" (unused), token_b = second YES hex ID
 #[derive(Debug, Clone)]
 pub struct MarketPair {
     pub pair_type: PairType,
-    pub token_a: String,
+    pub token_a: String,       // Polymarket YES token
+    pub no_token_a: String,    // Polymarket NO token (cross-platform only)
     pub token_b: String,
     pub market_id: String,
     pub gamma_id_a: String,
@@ -40,13 +41,18 @@ pub struct MarketPair {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Gap {
     pub event: String,
-    pub pair_type: String,        // "cross_platform" or "internal"
+    pub pair_type: String,
     pub market_id: String,
-    pub polymarket_price: f64,    // price of token_a (Polymarket YES)
-    pub kalshi_price: f64,        // price of token_b (Kalshi YES or second Poly YES)
+    /// Price of the Polymarket token being purchased (NO price for dir1, YES price for dir2/internal)
+    pub polymarket_price: f64,
+    /// Price of the Kalshi side being purchased (YES price for dir1, NO price for dir2)
+    pub kalshi_price: f64,
     pub gap_cents: f64,
-    pub polymarket_token: String, // token_a
-    pub kalshi_ticker: String,    // token_b
+    /// Token ID to BUY on Polymarket (NO token for cross-platform dir1, YES token for dir2/internal)
+    pub polymarket_token: String,
+    pub kalshi_ticker: String,
+    /// "buy" for Kalshi YES (dir1/internal), "sell" for Kalshi NO (dir2)
+    pub kalshi_action: String,
     pub timestamp: String,
 }
 
@@ -54,21 +60,23 @@ impl Gap {
     pub fn new(
         pair_type: String,
         market_id: String,
-        price_a: f64,
-        price_b: f64,
-        token_a: String,
-        token_b: String,
+        polymarket_price: f64,
+        kalshi_price: f64,
+        polymarket_token: String,
+        kalshi_ticker: String,
+        kalshi_action: String,
         gap_cents: f64,
     ) -> Self {
         Gap {
             event: "gap_detected".to_string(),
             pair_type,
             market_id,
-            polymarket_price: price_a,
-            kalshi_price: price_b,
+            polymarket_price,
+            kalshi_price,
             gap_cents,
-            polymarket_token: token_a,
-            kalshi_ticker: token_b,
+            polymarket_token,
+            kalshi_ticker,
+            kalshi_action,
             timestamp: Utc::now().to_rfc3339(),
         }
     }

@@ -206,6 +206,7 @@ async def main():
         entry = {
             "pair_type": pair.pair_type,
             "token_a": pair.token_a,
+            "no_token_a": pair.no_token_a,
             "token_b": pair.token_b,
             "market_id": pair.market_id,
             "confidence": pair.confidence,

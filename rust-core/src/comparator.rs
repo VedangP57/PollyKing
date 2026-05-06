@@ -83,44 +83,52 @@ fn check_cross_platform(
         None => return,
     };
 
-    // Direction 1: Poly NO + Kalshi YES
-    let combined = poly.no_price + kalshi.yes_price;
-    let gap_cents = (1.0 - combined) * 100.0;
-    if gap_cents >= config.min_gap_cents && gap_cents <= config.max_gap_cents {
+    // Direction 1: Buy Poly NO + Buy Kalshi YES
+    // combined = poly.no_price + kalshi.yes_price
+    let combined1 = poly.no_price + kalshi.yes_price;
+    let gap1 = (1.0 - combined1) * 100.0;
+    if gap1 >= config.min_gap_cents && gap1 <= config.max_gap_cents {
+        if pair.no_token_a.is_empty() {
+            // no_token_a not populated — skip to avoid buying wrong side
+            debug!("CrossPlatform dir1 skipped — no_token_a missing for {}", pair.market_id);
+        } else {
+            debug!(
+                "CrossPlatform dir1: {} | PolyNO:{:.4} KalshiYES:{:.4} | {:.1}c",
+                pair.market_id, poly.no_price, kalshi.yes_price, gap1
+            );
+            let gap = Gap::new(
+                "cross_platform".into(),
+                pair.market_id.clone(),
+                poly.no_price,      // price of the token being bought (NO)
+                kalshi.yes_price,   // price of the Kalshi side (YES)
+                pair.no_token_a.clone(),
+                pair.token_b.clone(),
+                "buy".into(),
+                gap1,
+            );
+            let _ = gap_tx.try_send(gap);
+        }
+    }
+
+    // Direction 2: Buy Poly YES + Buy Kalshi NO (= sell Kalshi YES)
+    // combined = poly.yes_price + kalshi.no_price
+    let combined2 = poly.yes_price + kalshi.no_price;
+    let gap2 = (1.0 - combined2) * 100.0;
+    if gap2 >= config.min_gap_cents && gap2 <= config.max_gap_cents {
         debug!(
-            "CrossPlatform gap: {} | PolyNO:{:.2} KalshiYES:{:.2} | {:.1}c",
-            pair.market_id, poly.no_price, kalshi.yes_price, gap_cents
+            "CrossPlatform dir2: {} | PolyYES:{:.4} KalshiNO:{:.4} | {:.1}c",
+            pair.market_id, poly.yes_price, kalshi.no_price, gap2
         );
         let gap = Gap::new(
             "cross_platform".into(),
-            pair.market_id.clone(),
-            poly.yes_price,
-            kalshi.yes_price,
-            pair.token_a.clone(),
-            pair.token_b.clone(),
-            gap_cents,
-        );
-        let _ = gap_tx.try_send(gap);
-    }
-
-    // Direction 2: Poly YES + Kalshi NO
-    let combined_rev = poly.yes_price + kalshi.no_price;
-    let gap_cents_rev = (1.0 - combined_rev) * 100.0;
-    if gap_cents_rev >= config.min_gap_cents && gap_cents_rev <= config.max_gap_cents {
-        debug!(
-            "CrossPlatform gap (rev): {} | PolyYES:{:.2} KalshiNO:{:.2} | {:.1}c",
-            pair.market_id, poly.yes_price, kalshi.no_price, gap_cents_rev
-        );
-        let mut gap = Gap::new(
-            "cross_platform".into(),
             format!("{}-rev", pair.market_id),
-            poly.yes_price,
-            kalshi.yes_price,
+            poly.yes_price,    // price of the token being bought (YES)
+            kalshi.no_price,   // price of the Kalshi side (NO)
             pair.token_a.clone(),
             pair.token_b.clone(),
-            gap_cents_rev,
+            "sell".into(),     // sell Kalshi YES = buy Kalshi NO
+            gap2,
         );
-        gap.gap_cents = gap_cents_rev;
         let _ = gap_tx.try_send(gap);
     }
 }
@@ -156,6 +164,7 @@ fn check_internal(
             price_b.yes_price,
             pair.token_a.clone(),
             pair.token_b.clone(),
+            "buy".into(),
             gap_cents,
         );
         let _ = gap_tx.try_send(gap);

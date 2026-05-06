@@ -109,6 +109,7 @@ fn load_market_pairs() -> Vec<MarketPair> {
                 Some(MarketPair {
                     pair_type,
                     token_a: token_a.to_string(),
+                    no_token_a: p["no_token_a"].as_str().unwrap_or("").to_string(),
                     token_b: token_b.to_string(),
                     market_id: market_id.to_string(),
                     gamma_id_a: p["gamma_id_a"].as_str().unwrap_or("").to_string(),

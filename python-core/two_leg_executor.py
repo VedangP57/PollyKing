@@ -32,14 +32,10 @@ class TwoLegExecutor:
         fraction = self._config.get("kelly_fraction", 0.25)
         min_bet = self._config.get("min_bet_usdc", 10.0)
         max_bet = self._config.get("max_bet_usdc", 100.0)
-        pair_type = gap.get("pair_type", "cross_platform")
         poly_price = gap["polymarket_price"]
         kalshi_price = gap["kalshi_price"]
-        combined = (
-            poly_price + kalshi_price
-            if pair_type == "internal"
-            else (1.0 - poly_price) + kalshi_price
-        )
+        # Both prices are now the actual leg prices — just add them directly
+        combined = poly_price + kalshi_price
         result = compute_arb_kelly_size(
             bankroll=bankroll,
             combined=combined,
@@ -51,31 +47,82 @@ class TwoLegExecutor:
         )
         return result["bet_usdc"] if result["action"] == "BET" else min_bet
 
+    def _dry_run_confirmation(self, gap: dict, bet_size: float) -> dict:
+        # polymarket_price and kalshi_price are now the actual leg prices (set correctly by Rust)
+        poly_price = gap["polymarket_price"]
+        kalshi_price = gap["kalshi_price"]
+        combined = poly_price + kalshi_price
+        k = bet_size / combined if combined > 0 else 0.0
+        fee_rate = gap.get("fee_rate", 0.04)
+        expected_profit = round(k - bet_size - fee_rate * bet_size, 4)
+        mid = gap["market_id"][:8]
+        return {
+            "polymarket_order_id": f"dry-poly-{mid}",
+            "kalshi_order_id": f"dry-kalshi-{mid}",
+            "total_spent": round(bet_size, 4),
+            "gap_cents": gap.get("gap_cents", 0.0),
+            "expected_profit": expected_profit,
+            "dry_run": True,
+        }
+
     async def execute(self, gap: dict, bet_size: Optional[float] = None) -> Optional[dict]:
         if bet_size is None:
             bet_size = self._compute_bet_size(gap)
 
+        if self._config.get("dry_run", True):
+            return self._dry_run_confirmation(gap, bet_size)
+
         pair_type = gap.get("pair_type", "cross_platform")
+
+        # Token side debug log — helps verify polymarket_token is correct before live trading
+        log.info(
+            "LIVE EXECUTE | market=%s | pair_type=%s | polymarket_token=%s | "
+            "kalshi_ticker=%s | poly_price=%.4f | kalshi_price=%.4f | gap=%.1f¢ | bet=$%.2f",
+            gap.get("market_id"), pair_type,
+            gap.get("polymarket_token"), gap.get("kalshi_ticker"),
+            gap.get("polymarket_price", 0), gap.get("kalshi_price", 0),
+            gap.get("gap_cents", 0), bet_size,
+        )
+
+        # Balance guard — skip if Polymarket wallet can't cover the position
+        try:
+            balance = await self._poly.get_balance()
+            poly_fraction = (1.0 - gap["polymarket_price"]) if pair_type == "cross_platform" else gap["polymarket_price"]
+            poly_amount = bet_size * poly_fraction
+            if balance < poly_amount:
+                log.warning(
+                    "Insufficient Polymarket balance: $%.2f available, $%.2f needed — skipping",
+                    balance, poly_amount,
+                )
+                return None
+        except Exception as e:
+            log.warning("Balance check failed (%s) — proceeding anyway", e)
+
         if pair_type == "internal":
             return await self._execute_internal(gap, bet_size)
         return await self._execute_cross_platform(gap, bet_size)
 
     async def _execute_cross_platform(self, gap: dict, bet_size: float) -> Optional[dict]:
+        # polymarket_price and kalshi_price are now the ACTUAL prices of the tokens being bought
+        # (set correctly for both directions in Rust comparator — no more manual inversion needed)
         poly_price = gap["polymarket_price"]
         kalshi_price = gap["kalshi_price"]
-        combined = (1.0 - poly_price) + kalshi_price
+        combined = poly_price + kalshi_price
         k = bet_size / combined if combined > 0 else 0.0
-        poly_amount = round(k * (1.0 - poly_price), 4)
+        poly_amount = round(k * poly_price, 4)
         kalshi_count = max(1, round(k))
+        kalshi_action = gap.get("kalshi_action", "buy")
 
         poly_task = self._poly.place_order(
             token_id=gap["polymarket_token"],
             side="BUY",
             amount_usdc=poly_amount,
+            price=round(poly_price, 4),
+            neg_risk=False,
         )
         kalshi_task = self._kalshi.place_order(
             ticker=gap["kalshi_ticker"],
-            action="buy",
+            action=kalshi_action,
             count=kalshi_count,
         )
         return await self._gather_legs(
@@ -95,11 +142,15 @@ class TwoLegExecutor:
             token_id=gap["polymarket_token"],
             side="BUY",
             amount_usdc=amount_a,
+            price=round(poly_price, 4),
+            neg_risk=True,
         )
         task_b = self._poly.place_order(
             token_id=gap["kalshi_ticker"],  # token_b stored in kalshi_ticker for internal pairs
             side="BUY",
             amount_usdc=amount_b,
+            price=round(kalshi_price, 4),
+            neg_risk=True,
         )
         return await self._gather_legs(
             gap, task_a, task_b, bet_size=bet_size,
@@ -122,11 +173,7 @@ class TwoLegExecutor:
 
         if a_ok and b_ok:
             fee_rate = gap.get("fee_rate", 0.04)
-            combined = (
-                gap["polymarket_price"] + gap["kalshi_price"]
-                if gap.get("pair_type") == "internal"
-                else (1.0 - gap["polymarket_price"]) + gap["kalshi_price"]
-            )
+            combined = gap["polymarket_price"] + gap["kalshi_price"]
             k = bet_size / combined if combined > 0 else 0.0
             fee = fee_rate * bet_size
             expected_profit = round(k - bet_size - fee, 4)
@@ -158,11 +205,16 @@ class TwoLegExecutor:
 
     async def _emergency_close(self, filled: dict, gap: dict) -> None:
         platform = filled.get("platform", "")
+        pair_type = gap.get("pair_type", "cross_platform")
         try:
             if platform == "polymarket":
+                # Sell back at the price we bought — executor adds slippage buffer
+                buy_price = filled.get("price", gap.get("polymarket_price", 0.5))
                 await self._poly.close_order(
                     token_id=filled["token_id"],
                     amount_usdc=filled["amount_usdc"],
+                    price=buy_price,
+                    neg_risk=(pair_type == "internal"),
                 )
             elif platform == "kalshi":
                 await self._kalshi.close_order(
