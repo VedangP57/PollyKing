@@ -221,8 +221,9 @@ async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegEx
 
     market_id = gap["market_id"]
 
-    # Attach per-pair fee_rate so detector and EV gate use the correct rate
-    gap["fee_rate"] = fee_rate_map.get(market_id, 0.04)
+    # Strip "-rev" suffix before fee lookup — Direction 2 rev gaps share the base pair's fee
+    _lookup_id = market_id.removesuffix("-rev")
+    gap["fee_rate"] = fee_rate_map.get(_lookup_id, fee_rate_map.get(market_id, 0.04))
 
     # Update Bayesian posterior for this market
     poly_price = gap.get("polymarket_price", 0.5)
