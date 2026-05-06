@@ -17,6 +17,7 @@ from matcher import Matcher
 from reconciler import Reconciler
 from bayes_engine import BayesEngine
 from risk_engine import RiskEngine
+from startup_audit import audit_orphan_positions
 
 load_dotenv()
 
@@ -176,6 +177,11 @@ async def main():
     stdout_queue: asyncio.Queue = asyncio.Queue()
 
     executor = TwoLegExecutor(CONFIG, db_conn)
+
+    # Live mode only: detect orphan positions from any previous crash
+    if not CONFIG["dry_run"]:
+        notifier.logger.info("Auditing exchange positions for orphans from prior runs...")
+        await audit_orphan_positions(executor._poly, executor._kalshi, db_conn)
 
     reconciler = Reconciler(CONFIG, db_conn)
     asyncio.create_task(reconciler.run_forever())

@@ -80,3 +80,47 @@ class KalshiExecutor:
     async def close_order(self, ticker: str, count: int) -> None:
         """Emergency close: sell back a filled position."""
         await self.place_order(ticker, "sell", count)
+
+    async def get_open_orders(self) -> list[dict]:
+        """Return all open orders from Kalshi portfolio."""
+        path = "/trade-api/v2/portfolio/orders"
+        headers = self._sign("GET", path)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.api_url}/portfolio/orders",
+                headers=headers,
+                params={"status": "open"},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return data.get("orders", [])
+
+    async def get_order_status(self, order_id: str) -> str:
+        """Return Kalshi order status string: 'resting', 'matched', 'canceled', etc."""
+        path = f"/trade-api/v2/portfolio/orders/{order_id}"
+        headers = self._sign("GET", path)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.api_url}/portfolio/orders/{order_id}",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return "unknown"
+                data = await resp.json()
+                return data.get("order", {}).get("status", "unknown")
+
+    async def cancel_order(self, order_id: str) -> None:
+        """Cancel an open Kalshi order by order_id."""
+        path = f"/trade-api/v2/portfolio/orders/{order_id}"
+        headers = self._sign("DELETE", path)
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(
+                f"{self.api_url}/portfolio/orders/{order_id}",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status not in (200, 204):
+                    raise ExecutorError(f"Kalshi cancel failed HTTP {resp.status}")
