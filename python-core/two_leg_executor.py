@@ -3,6 +3,7 @@ import logging
 import sqlite3
 from typing import Optional
 
+from execution_policy import decide as _policy_decide
 from kalshi_executor import ExecutorError, KalshiExecutor
 from kelly_engine import compute_arb_kelly_size
 from polymarket_executor import PolymarketExecutor
@@ -95,6 +96,10 @@ class TwoLegExecutor:
         if self._config.get("dry_run", True):
             return self._dry_run_confirmation(gap, bet_size)
 
+        # Determine order urgency — urgent gaps use aggressive pricing (+0.03 buffer)
+        policy = _policy_decide(gap)
+        price_buffer = 0.03 if policy.urgency == "high" else 0.0
+
         pair_type = gap.get("pair_type", "cross_platform")
 
         # Token side debug log — helps verify polymarket_token is correct before live trading
@@ -122,10 +127,10 @@ class TwoLegExecutor:
             log.warning("Balance check failed (%s) — proceeding anyway", e)
 
         if pair_type == "internal":
-            return await self._execute_internal(gap, bet_size)
-        return await self._execute_cross_platform(gap, bet_size)
+            return await self._execute_internal(gap, bet_size, price_buffer)
+        return await self._execute_cross_platform(gap, bet_size, price_buffer)
 
-    async def _execute_cross_platform(self, gap: dict, bet_size: float) -> Optional[dict]:
+    async def _execute_cross_platform(self, gap: dict, bet_size: float, price_buffer: float = 0.0) -> Optional[dict]:
         # polymarket_price and kalshi_price are now the ACTUAL prices of the tokens being bought
         # (set correctly for both directions in Rust comparator — no more manual inversion needed)
         poly_price = gap["polymarket_price"]
@@ -135,12 +140,13 @@ class TwoLegExecutor:
         poly_amount = round(k * poly_price, 4)
         kalshi_count = max(1, round(k))
         kalshi_action = gap.get("kalshi_action", "buy")
+        order_price = min(round(poly_price + price_buffer, 4), 0.99)
 
         poly_task = self._poly.place_order(
             token_id=gap["polymarket_token"],
             side="BUY",
             amount_usdc=poly_amount,
-            price=round(poly_price, 4),
+            price=order_price,
             neg_risk=False,
         )
         kalshi_task = self._kalshi.place_order(
@@ -153,7 +159,7 @@ class TwoLegExecutor:
             poly_amount=poly_amount, kalshi_count=kalshi_count,
         )
 
-    async def _execute_internal(self, gap: dict, bet_size: float) -> Optional[dict]:
+    async def _execute_internal(self, gap: dict, bet_size: float, price_buffer: float = 0.0) -> Optional[dict]:
         poly_price = gap["polymarket_price"]
         kalshi_price = gap["kalshi_price"]
         combined = poly_price + kalshi_price
@@ -165,14 +171,14 @@ class TwoLegExecutor:
             token_id=gap["polymarket_token"],
             side="BUY",
             amount_usdc=amount_a,
-            price=round(poly_price, 4),
+            price=min(round(poly_price + price_buffer, 4), 0.99),
             neg_risk=True,
         )
         task_b = self._poly.place_order(
             token_id=gap["kalshi_ticker"],  # token_b stored in kalshi_ticker for internal pairs
             side="BUY",
             amount_usdc=amount_b,
-            price=round(kalshi_price, 4),
+            price=min(round(kalshi_price + price_buffer, 4), 0.99),
             neg_risk=True,
         )
         return await self._gather_legs(

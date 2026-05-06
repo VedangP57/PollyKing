@@ -322,6 +322,52 @@ async def test_dry_run_skips_fill_verification(db, cross_platform_gap):
 
 
 @pytest.mark.asyncio
+async def test_urgent_gap_uses_aggressive_price(config, db):
+    """Gap with closes_at < 30 min → policy returns urgency=high → price gets +0.03 buffer."""
+    from datetime import datetime, timezone, timedelta
+
+    urgent_gap = {
+        "pair_type": "cross_platform",
+        "market_id": "urgent-market",
+        "polymarket_price": 0.70,
+        "kalshi_price": 0.22,
+        "gap_cents": 8.0,
+        "confidence": "high",
+        "polymarket_token": "no_tok",
+        "kalshi_ticker": "KXURGENT",
+        "kalshi_action": "buy",
+        "fee_rate": 0.02,
+        "closes_at": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat(),
+    }
+
+    captured_price = []
+
+    async def capture_place_order(token_id, side, amount_usdc, price=0.5, neg_risk=False):
+        captured_price.append(price)
+        return {"order_id": "poly_u", "status": "matched", "platform": "polymarket",
+                "token_id": token_id, "amount_usdc": amount_usdc}
+
+    with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.05), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.02):
+        MockPoly.return_value.place_order = capture_place_order
+        MockPoly.return_value.get_order_status = AsyncMock(return_value="matched")
+        MockKalshi.return_value.place_order = AsyncMock(return_value={
+            "order_id": "kal_u", "status": "matched", "platform": "kalshi",
+            "ticker": "KXURGENT", "count": 10,
+        })
+        MockKalshi.return_value.get_order_status = AsyncMock(return_value="matched")
+
+        ex = TwoLegExecutor(config, db)
+        await ex.execute(urgent_gap, bet_size=10.0)
+
+    # Aggressive price = base_price + 0.03
+    assert len(captured_price) > 0
+    assert captured_price[0] > urgent_gap["polymarket_price"]
+
+
+@pytest.mark.asyncio
 async def test_internal_pair_uses_polymarket_for_both_legs(config, db, internal_gap):
     poly_result_a = {"order_id": "poly_a", "status": "matched", "platform": "polymarket",
                      "token_id": "tokenA_hex", "amount_usdc": 5.0}
