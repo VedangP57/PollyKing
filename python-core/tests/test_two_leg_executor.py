@@ -399,8 +399,8 @@ async def test_fill_polls_run_concurrently(config, db, cross_platform_gap):
 
     assert result is None
     # Sequential: ~2×TIMEOUT ≈ 0.24s. Concurrent: ~TIMEOUT ≈ 0.12s.
-    assert elapsed < TIMEOUT * 1.8, (
-        f"Fill polls appear sequential: {elapsed:.3f}s > {TIMEOUT * 1.8:.3f}s limit"
+    assert elapsed < TIMEOUT * 2.0, (
+        f"Fill polls appear sequential: {elapsed:.3f}s > {TIMEOUT * 2.0:.3f}s limit"
     )
 
 

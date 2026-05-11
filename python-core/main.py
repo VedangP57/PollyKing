@@ -13,6 +13,7 @@ import metrics as _metrics
 import notifier
 import tracker
 from detector import GapDetector
+from opportunity_engine import OpportunityEngine
 from two_leg_executor import TwoLegExecutor
 from matcher import Matcher
 from reconciler import Reconciler
@@ -191,6 +192,14 @@ async def main():
     await _health_server.start()
     notifier.logger.info("Health server started on :8080")
 
+    opp_engine = OpportunityEngine(db_conn)
+
+    async def _evict_stale_opportunities():
+        while True:
+            await asyncio.sleep(60)
+            opp_engine.evict_stale()
+    asyncio.create_task(_evict_stale_opportunities())
+
     stdout_queue: asyncio.Queue = asyncio.Queue()
 
     executor = TwoLegExecutor(CONFIG, db_conn)
@@ -204,12 +213,12 @@ async def main():
     asyncio.create_task(reconciler.run_forever())
 
     asyncio.create_task(_read_stderr(rust_process.stderr))
-    asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn, bayes_engine, fee_rate_map, _health_state))
+    asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn, bayes_engine, fee_rate_map, _health_state, opp_engine))
 
     await rust_process.wait()
 
 
-async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, db_conn, bayes_engine: BayesEngine, fee_rate_map: dict, health_state: dict | None = None):
+async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, db_conn, bayes_engine: BayesEngine, fee_rate_map: dict, health_state: dict | None = None, opp_engine: OpportunityEngine | None = None):
     async for line in stdout:
         text = line.decode().strip()
         if not text:
@@ -229,17 +238,20 @@ async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, 
         elif event_type == "gap_detected":
             # Fire-and-forget: _handle_gap calls TwoLegExecutor directly.
             # We do not block here so _read_stdout can keep draining Rust stdout.
-            asyncio.create_task(_handle_gap(event, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map, health_state))
+            asyncio.create_task(_handle_gap(event, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map, health_state, opp_engine))
 
 
-async def _handle_gap(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict, health_state: dict | None = None):
+async def _handle_gap(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict, health_state: dict | None = None, opp_engine: OpportunityEngine | None = None):
     async with _GAP_SEMAPHORE:
-        await _handle_gap_inner(gap, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map, health_state)
+        await _handle_gap_inner(gap, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map, health_state, opp_engine)
 
 
-async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict, health_state: dict | None = None):
+async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict, health_state: dict | None = None, opp_engine: OpportunityEngine | None = None):
     if health_state is not None:
         health_state["last_gap_seen"] = _time.monotonic()
+    if opp_engine is not None:
+        opp = opp_engine.observe(gap)
+        gap["opp_id"] = opp.opp_key if opp else None
     notifier.gap_detected(gap)
 
     market_id = gap["market_id"]
@@ -317,6 +329,8 @@ async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegEx
     trade_id = tracker.log_trade(db_conn, trade)
     tracker.mark_gap_executed(db_conn, gap_id)
     notifier.trade_logged(trade_id)
+    if opp_engine is not None:
+        opp_engine.mark_executed(market_id, gap.get("pair_type", "cross_platform"), trade_id)
 
 
 async def _read_stderr(stderr):

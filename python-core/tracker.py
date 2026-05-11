@@ -87,12 +87,43 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             status TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS opportunities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            opp_key TEXT NOT NULL UNIQUE,
+            market_id TEXT NOT NULL,
+            pair_type TEXT NOT NULL DEFAULT 'cross_platform',
+            direction TEXT NOT NULL DEFAULT 'dir1',
+            first_seen TEXT NOT NULL,
+            last_seen TEXT NOT NULL,
+            first_gap_cents REAL,
+            max_gap_cents REAL,
+            min_gap_cents REAL,
+            avg_gap_cents REAL,
+            gap_volatility REAL DEFAULT 0.0,
+            observation_count INTEGER DEFAULT 0,
+            duration_ms INTEGER DEFAULT 0,
+            state TEXT NOT NULL DEFAULT 'detected',
+            execution_attempted INTEGER DEFAULT 0,
+            execution_success INTEGER DEFAULT 0,
+            trade_id INTEGER REFERENCES trades(id),
+            collapse_reason TEXT,
+            stale_reason TEXT,
+            poly_bid_size REAL,
+            kalshi_ask_size REAL,
+            min_executable_notional REAL,
+            created_at TEXT DEFAULT (datetime('now')),
+            closed_at TEXT
+        );
+
         -- Performance indexes — idempotent (must come after CREATE TABLE)
         CREATE INDEX IF NOT EXISTS idx_gaps_detected ON gaps(detected_at);
         CREATE INDEX IF NOT EXISTS idx_gaps_market_detected ON gaps(market_id, detected_at DESC);
         CREATE INDEX IF NOT EXISTS idx_trades_opened ON trades(opened_at);
         CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
         CREATE INDEX IF NOT EXISTS idx_trades_dry_status ON trades(dry_run, status);
+        CREATE INDEX IF NOT EXISTS idx_opp_key ON opportunities(opp_key);
+        CREATE INDEX IF NOT EXISTS idx_opp_state ON opportunities(state, last_seen DESC);
+        CREATE INDEX IF NOT EXISTS idx_opp_market ON opportunities(market_id, state);
     """)
     conn.commit()
 
@@ -331,3 +362,44 @@ def set_bot_state(conn: sqlite3.Connection, key: str, value: str) -> None:
 def get_bot_state(conn: sqlite3.Connection, key: str, default: str = "") -> str:
     row = conn.execute("SELECT value FROM bot_state WHERE key=?", (key,)).fetchone()
     return row[0] if row else default
+
+
+def upsert_opportunity(conn: sqlite3.Connection, opp: dict) -> int:
+    now = datetime.now(timezone.utc).isoformat()
+    cur = conn.execute(
+        """INSERT INTO opportunities
+           (opp_key, market_id, pair_type, direction, first_seen, last_seen,
+            first_gap_cents, max_gap_cents, min_gap_cents, avg_gap_cents,
+            gap_volatility, observation_count, duration_ms, state,
+            poly_bid_size, kalshi_ask_size, min_executable_notional)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(opp_key) DO UPDATE SET
+               last_seen=excluded.last_seen,
+               max_gap_cents=MAX(max_gap_cents, excluded.max_gap_cents),
+               min_gap_cents=MIN(min_gap_cents, excluded.min_gap_cents),
+               avg_gap_cents=excluded.avg_gap_cents,
+               gap_volatility=excluded.gap_volatility,
+               observation_count=excluded.observation_count,
+               duration_ms=excluded.duration_ms,
+               state=excluded.state,
+               poly_bid_size=excluded.poly_bid_size,
+               kalshi_ask_size=excluded.kalshi_ask_size,
+               min_executable_notional=excluded.min_executable_notional""",
+        (opp["opp_key"], opp["market_id"], opp.get("pair_type", "cross_platform"),
+         opp.get("direction", "dir1"), opp["first_seen"], now,
+         opp["first_gap_cents"], opp["max_gap_cents"], opp["min_gap_cents"],
+         opp["avg_gap_cents"], opp.get("gap_volatility", 0.0),
+         opp["observation_count"], opp.get("duration_ms", 0), opp.get("state", "detected"),
+         opp.get("poly_bid_size"), opp.get("kalshi_ask_size"), opp.get("min_executable_notional")),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def close_opportunity(conn: sqlite3.Connection, opp_key: str, state: str, reason: str = "") -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        "UPDATE opportunities SET state=?, closed_at=?, collapse_reason=? WHERE opp_key=?",
+        (state, now, reason, opp_key),
+    )
+    conn.commit()
