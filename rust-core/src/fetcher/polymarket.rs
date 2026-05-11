@@ -23,20 +23,81 @@ const REST_BATCH_SIZE: usize = 100;
 // Public helpers — stubs (filled in Task 2)
 // ---------------------------------------------------------------------------
 
-pub fn build_subscription_message(_token_ids: &[String]) -> String {
-    todo!("implement build_subscription_message")
+pub fn build_subscription_message(token_ids: &[String]) -> String {
+    serde_json::json!({
+        "assets_ids": token_ids,
+        "type": "market",
+        "custom_feature_enabled": true,
+    })
+    .to_string()
 }
 
-pub fn build_dynamic_subscribe_message(_token_ids: &[String]) -> String {
-    todo!("implement build_dynamic_subscribe_message")
+pub fn build_dynamic_subscribe_message(token_ids: &[String]) -> String {
+    serde_json::json!({
+        "assets_ids": token_ids,
+        "operation": "subscribe",
+        "custom_feature_enabled": true,
+    })
+    .to_string()
 }
 
 pub fn handle_price_message(
-    _text: &str,
-    _price_map: &Arc<RwLock<HashMap<String, Price>>>,
-    _price_watch_tx: &Arc<watch::Sender<u64>>,
+    text: &str,
+    price_map: &Arc<RwLock<HashMap<String, Price>>>,
+    price_watch_tx: &Arc<watch::Sender<u64>>,
 ) {
-    todo!("implement handle_price_message")
+    if text == "PONG" {
+        return;
+    }
+
+    let val: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Polymarket can send either a single object or a JSON array of events.
+    let messages: Vec<Value> = if val.is_array() {
+        val.as_array().cloned().unwrap_or_default()
+    } else {
+        vec![val]
+    };
+
+    let mut updated = false;
+
+    for msg in &messages {
+        if msg.get("event_type").and_then(|v| v.as_str()) != Some("best_bid_ask") {
+            continue;
+        }
+        let asset_id = match msg.get("asset_id").and_then(|v| v.as_str()) {
+            Some(id) if !id.is_empty() => id,
+            _ => continue,
+        };
+        let bid_price: f64 = match msg
+            .get("bid_price")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+        {
+            Some(p) if p > 0.0 => p,
+            _ => continue,
+        };
+
+        price_map.write().unwrap().insert(
+            format!("poly:{asset_id}"),
+            Price {
+                market_id: asset_id.to_string(),
+                platform: Platform::Polymarket,
+                yes_price: bid_price,
+                no_price: 1.0 - bid_price,
+                timestamp: Utc::now(),
+            },
+        );
+        updated = true;
+    }
+
+    if updated {
+        let next = *price_watch_tx.borrow() + 1;
+        let _ = price_watch_tx.send(next);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -155,12 +216,14 @@ mod tests {
     }
 
     #[test]
-    fn test_watch_fires_on_price_update() {
+    fn test_watch_counter_increments_when_price_map_updated() {
+        // Keep _rx alive so send() returns Ok(()) and actually updates shared state.
+        // borrow() reads the shared state synchronously — no tokio runtime required.
         let pm = make_price_map();
-        let (tx, mut rx) = watch::channel(0u64);
-        let tx = Arc::new(tx);
-        let msg = r#"{"event_type":"best_bid_ask","asset_id":"abc","bid_price":"0.55","bid_size":"10","ask_price":"0.56","ask_size":"5"}"#;
+        let (tx_inner, _rx) = watch::channel(0u64);
+        let tx = Arc::new(tx_inner);
+        let msg = r#"{"event_type":"best_bid_ask","asset_id":"wtest","bid_price":"0.55","bid_size":"10","ask_price":"0.56","ask_size":"5"}"#;
         handle_price_message(msg, &pm, &tx);
-        assert!(rx.has_changed().unwrap(), "watch must fire on price update");
+        assert_eq!(*tx.borrow(), 1u64, "watch counter must be 1 after one price update");
     }
 }
