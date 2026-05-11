@@ -76,6 +76,12 @@ import time as _time
 _last_traded: dict[str, float] = {}
 _TRADE_COOLDOWN = 300.0  # seconds before same market can trade again (secondary guard)
 
+# Per-market previous price — needed by BayesEngine to compute likelihood ratio.
+# Without prev_price, BayesEngine.update() returns the prior unchanged (no-op).
+# Memory: bounded by number of distinct markets seen (typically <200 in markets.json).
+# Concurrency-safe: read+write in _handle_gap_inner are synchronous (no await between).
+_prev_prices: dict[str, float] = {}
+
 # Semaphore: max concurrent live API calls — prevents rate limiting on both exchanges
 _GAP_SEMAPHORE: asyncio.Semaphore | None = None
 _MAX_CONCURRENT_EXECUTIONS = 3
@@ -114,7 +120,7 @@ async def main():
     if needs_backfill:
         notifier.logger.info("markets.json is stale or missing cross-platform pairs — running backfill...")
         result = subprocess.run(
-            ["python", "scripts/backfill_matches.py"],
+            [sys.executable, "scripts/backfill_matches.py"],
             capture_output=True, text=True,
             cwd=str(Path(__file__).parent.parent),
         )
@@ -225,9 +231,12 @@ async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegEx
     _lookup_id = market_id.removesuffix("-rev")
     gap["fee_rate"] = fee_rate_map.get(_lookup_id, fee_rate_map.get(market_id, 0.04))
 
-    # Update Bayesian posterior for this market
+    # Update Bayesian posterior for this market.
+    # Pass prev_price so the likelihood ratio reflects actual price movement.
     poly_price = gap.get("polymarket_price", 0.5)
-    bayes_engine.update(market_id, poly_price, prev_price=None)
+    prev_price = _prev_prices.get(market_id)
+    bayes_engine.update(market_id, poly_price, prev_price=prev_price)
+    _prev_prices[market_id] = poly_price
     posterior = bayes_engine.get_posterior(market_id)
     gap["p_model"] = posterior
 
