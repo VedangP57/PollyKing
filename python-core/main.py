@@ -9,6 +9,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+import metrics as _metrics
 import notifier
 import tracker
 from detector import GapDetector
@@ -180,6 +181,10 @@ async def main():
     global _GAP_SEMAPHORE
     _GAP_SEMAPHORE = asyncio.Semaphore(_MAX_CONCURRENT_EXECUTIONS)
 
+    from prometheus_client import start_http_server as _prom_start
+    _prom_start(9090)
+    notifier.logger.info("Prometheus metrics server started on :9090")
+
     stdout_queue: asyncio.Queue = asyncio.Queue()
 
     executor = TwoLegExecutor(CONFIG, db_conn)
@@ -211,7 +216,11 @@ async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, 
 
         event_type = event.get("event")
 
-        if event_type == "gap_detected":
+        if event_type == "ws_reconnect":
+            platform = event.get("platform", "unknown")
+            _metrics.inc_ws_reconnect(platform)
+            notifier.logger.debug(f"WS reconnect: {platform}")
+        elif event_type == "gap_detected":
             # Fire-and-forget: _handle_gap calls TwoLegExecutor directly.
             # We do not block here so _read_stdout can keep draining Rust stdout.
             asyncio.create_task(_handle_gap(event, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map))
@@ -267,7 +276,18 @@ async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegEx
 
     if not confirmation:
         notifier.logger.warning(f"Execution failed for {market_id} — gap logged, no trade")
+        _metrics.inc_execution(
+            pair_type=gap.get("pair_type", "cross_platform"),
+            dry_run=CONFIG.get("dry_run", True),
+            outcome="execution_failed",
+        )
         return
+
+    _metrics.inc_execution(
+        pair_type=gap.get("pair_type", "cross_platform"),
+        dry_run=CONFIG.get("dry_run", True),
+        outcome="success",
+    )
 
     pair_type = gap.get("pair_type", "cross_platform")
     poly_side = "YES" if pair_type == "internal" else "NO"
