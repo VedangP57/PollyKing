@@ -81,13 +81,20 @@ pub fn handle_price_message(
             _ => continue,
         };
 
+        let ask_price: f64 = msg
+            .get("ask_price")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .filter(|&p| p > 0.0)
+            .unwrap_or(bid_price);   // fall back to bid when ask absent
+
         price_map.write().unwrap().insert(
             format!("poly:{asset_id}"),
             Price {
                 market_id: asset_id.to_string(),
                 platform: Platform::Polymarket,
                 yes_price: bid_price,
-                yes_ask: bid_price,   // updated in Task 2 to parse ask_price from event
+                yes_ask: ask_price,
                 no_price: 1.0 - bid_price,
                 timestamp: Utc::now(),
             },
@@ -489,6 +496,29 @@ mod tests {
         assert_eq!(parsed["operation"], "subscribe");
         assert_eq!(parsed["custom_feature_enabled"], true);
         assert_eq!(parsed["assets_ids"][0].as_str().unwrap(), "new_tok");
+    }
+
+    #[test]
+    fn test_ask_price_stored_in_yes_ask() {
+        let pm = make_price_map();
+        let tx = make_watch();
+        let msg = r#"{"event_type":"best_bid_ask","asset_id":"asktest","bid_price":"0.64","bid_size":"100","ask_price":"0.65","ask_size":"50"}"#;
+        handle_price_message(msg, &pm, &tx);
+        let map = pm.read().unwrap();
+        let price = map.get("poly:asktest").unwrap();
+        assert!((price.yes_price - 0.64).abs() < 0.001, "yes_price should be bid=0.64");
+        assert!((price.yes_ask - 0.65).abs() < 0.001, "yes_ask should be ask=0.65, got {}", price.yes_ask);
+    }
+
+    #[test]
+    fn test_ask_price_absent_falls_back_to_bid() {
+        let pm = make_price_map();
+        let tx = make_watch();
+        let msg = r#"{"event_type":"best_bid_ask","asset_id":"noask","bid_price":"0.55","bid_size":"10"}"#;
+        handle_price_message(msg, &pm, &tx);
+        let map = pm.read().unwrap();
+        let price = map.get("poly:noask").unwrap();
+        assert!((price.yes_ask - 0.55).abs() < 0.001, "yes_ask should fall back to bid, got {}", price.yes_ask);
     }
 
     #[test]
