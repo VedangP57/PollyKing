@@ -457,6 +457,39 @@ async def test_kalshi_partial_fill_routes_close_without_platform_in_result(confi
 
 
 @pytest.mark.asyncio
+async def test_fill_poll_records_fill_metric_on_success(config, db, cross_platform_gap):
+    """fill_polls counter must be incremented when poll returns filled."""
+    from prometheus_client import REGISTRY
+    config["dry_run"] = False
+
+    before = REGISTRY.get_sample_value(
+        "arb_fill_polls_total",
+        {"platform": "polymarket", "result": "filled"}
+    ) or 0.0
+
+    poly_result = {"order_id": "p1", "status": "matched", "token_id": "tok"}
+    kal_result = {"order_id": "k1", "status": "matched", "ticker": "TICK"}
+
+    with patch("two_leg_executor.PolymarketExecutor") as MP, \
+         patch("two_leg_executor.KalshiExecutor") as MK, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.1), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.05):
+        MP.return_value.place_order = AsyncMock(return_value=poly_result)
+        MP.return_value.get_order_status = AsyncMock(return_value="matched")
+        MK.return_value.place_order = AsyncMock(return_value=kal_result)
+        MK.return_value.get_order_status = AsyncMock(return_value="matched")
+
+        ex = TwoLegExecutor(config, db)
+        await ex.execute(cross_platform_gap, bet_size=10.0)
+
+    after = REGISTRY.get_sample_value(
+        "arb_fill_polls_total",
+        {"platform": "polymarket", "result": "filled"}
+    )
+    assert after == before + 1.0
+
+
+@pytest.mark.asyncio
 async def test_internal_pair_uses_polymarket_for_both_legs(config, db, internal_gap):
     poly_result_a = {"order_id": "poly_a", "status": "matched", "platform": "polymarket",
                      "token_id": "tokenA_hex", "amount_usdc": 5.0}

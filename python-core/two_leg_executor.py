@@ -1,8 +1,10 @@
 import asyncio
 import logging
 import sqlite3
+import time as _time
 from typing import Optional
 
+import metrics as _metrics
 from execution_policy import decide as _policy_decide
 from kalshi_executor import ExecutorError, KalshiExecutor
 from kelly_engine import compute_arb_kelly_size
@@ -188,8 +190,14 @@ class TwoLegExecutor:
         )
 
     async def _poll_and_cancel(self, platform: str, order_id: str) -> bool:
+        t0 = _time.monotonic()
         filled = await self._wait_for_fill(platform, order_id)
-        if not filled:
+        elapsed = _time.monotonic() - t0
+        if filled:
+            _metrics.observe_fill_latency(platform, elapsed)
+            _metrics.inc_fill_poll(platform, "filled")
+        else:
+            _metrics.inc_fill_poll(platform, "timeout")
             log.warning(
                 "%s order %s did not fill in %ss — canceling",
                 platform, order_id, _FILL_TIMEOUT,
@@ -345,6 +353,7 @@ class TwoLegExecutor:
             )
             status = "open"
 
+        _metrics.inc_emergency_close(platform)
         log_emergency_position(self._db, {
             "market_id": market_id,
             "platform": platform,
