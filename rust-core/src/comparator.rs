@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
 
 use anyhow::Result;
 use log::debug;
-use tokio::time::interval;
+use tokio::sync::Notify;
 
 use crate::types::{AppConfig, Gap, MarketPair, PairType, Price};
 
@@ -37,17 +36,17 @@ pub async fn run(
     pairs: Vec<MarketPair>,
     // RwLock: many readers can hold simultaneously without blocking each other.
     // The fetchers write infrequently (once per poll cycle); the comparator reads
-    // every 10ms. With Mutex every read was exclusive even though it was read-only.
+    // only when a fetcher has written a new price. With Mutex every read was
+    // exclusive even though it was read-only.
     price_map: Arc<RwLock<HashMap<String, Price>>>,
+    price_notify: Arc<Notify>,
     gap_tx: crossbeam_channel::Sender<Gap>,
 ) -> Result<()> {
     // Pre-compute keys once — no format!() in the hot loop.
     let keys = precompute_keys(&pairs);
 
-    let mut ticker = interval(Duration::from_millis(10));
-
     loop {
-        ticker.tick().await;
+        price_notify.notified().await;
 
         // Read lock: does NOT clone the entire map.
         // Held only for the duration of the loop below (~microseconds).

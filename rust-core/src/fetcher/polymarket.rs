@@ -6,6 +6,7 @@ use anyhow::Result;
 use chrono::Utc;
 use log::{info, warn};
 use serde_json::Value;
+use tokio::sync::Notify;
 
 use crate::types::{Platform, Price};
 
@@ -27,6 +28,7 @@ pub async fn run(
     gamma_url: String,
     token_to_gamma: HashMap<String, String>,
     price_map: Arc<RwLock<HashMap<String, Price>>>,
+    price_notify: Arc<Notify>,
 ) -> Result<()> {
     if token_to_gamma.is_empty() {
         info!("Polymarket: no tokens to track — REST poller idle.");
@@ -68,7 +70,12 @@ pub async fn run(
             let url = format!("{}/markets?{}", gamma_url.trim_end_matches('/'), query);
 
             match fetch_batch(&client, &url, &gamma_to_token, &price_map).await {
-                Ok(n) => updates += n,
+                Ok(n) => {
+                    updates += n;
+                    if n > 0 {
+                        price_notify.notify_waiters();
+                    }
+                }
                 Err(e) => {
                     warn!("Polymarket batch fetch error: {e}");
                     errors += 1;
