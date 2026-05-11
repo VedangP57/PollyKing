@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
@@ -56,66 +56,122 @@ pub fn sign_request(api_secret: &str, timestamp: &str, method: &str, path: &str)
 }
 
 // ---------------------------------------------------------------------------
+// Per-ticker orderbook (BTreeMap so best-bid/ask is always O(log n) lookup)
+// ---------------------------------------------------------------------------
+
+/// Maintains both YES and NO bid levels for one Kalshi ticker.
+/// Stored alongside price_map so deltas can recompute best bid/ask accurately.
+#[derive(Debug, Default)]
+pub struct KalshiBook {
+    yes: BTreeMap<i64, i64>,  // price_cents → qty
+    no: BTreeMap<i64, i64>,
+}
+
+impl KalshiBook {
+    pub fn best_yes_bid_cents(&self) -> Option<i64> {
+        self.yes.iter().rev().find(|(_, &qty)| qty > 0).map(|(&p, _)| p)
+    }
+
+    pub fn best_no_bid_cents(&self) -> Option<i64> {
+        self.no.iter().rev().find(|(_, &qty)| qty > 0).map(|(&p, _)| p)
+    }
+
+    /// YES ask = 100 - best NO bid (binary market identity).
+    pub fn yes_ask_cents(&self) -> Option<i64> {
+        self.best_no_bid_cents().map(|no_bid| 100 - no_bid)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Price-map helpers
 // ---------------------------------------------------------------------------
 
-/// Apply a full orderbook snapshot. yes/no arrays: [[price_cents, qty], ...].
-/// Best bid = highest price with qty > 0.
+/// Apply a full orderbook snapshot. Rebuilds the book from scratch, then
+/// recomputes yes_bid and yes_ask from both sides. yes/no arrays: [[price_cents, qty], ...].
 fn apply_snapshot(
     ticker: &str,
     yes_levels: &[[i64; 2]],
-    _no_levels: &[[i64; 2]],
+    no_levels: &[[i64; 2]],
     market_id: &str,
     price_map: &Arc<RwLock<HashMap<String, Price>>>,
+    books: &Arc<RwLock<HashMap<String, KalshiBook>>>,
 ) {
-    let yes_price = yes_levels
-        .iter()
-        .filter(|lvl| lvl[1] > 0)
-        .map(|lvl| lvl[0])
-        .max()
-        .unwrap_or(0) as f64
-        / 100.0;
-
-    if yes_price <= 0.0 {
-        return;
+    let mut book = KalshiBook::default();
+    for lvl in yes_levels {
+        book.yes.insert(lvl[0], lvl[1]);
     }
+    for lvl in no_levels {
+        book.no.insert(lvl[0], lvl[1]);
+    }
+
+    let yes_bid_cents = match book.best_yes_bid_cents() {
+        Some(c) => c,
+        None => {
+            books.write().unwrap().insert(ticker.to_string(), book);
+            return;
+        }
+    };
+    let yes_bid = yes_bid_cents as f64 / 100.0;
+    let yes_ask = book
+        .yes_ask_cents()
+        .map(|c| c as f64 / 100.0)
+        .unwrap_or(yes_bid);  // fall back to bid when NO side absent
 
     let price = Price {
         market_id: market_id.to_string(),
         platform: Platform::Kalshi,
-        yes_price,
-        yes_ask: yes_price,   // updated in Task 3 to derive from NO-side orderbook
-        no_price: 1.0 - yes_price,
+        yes_price: yes_bid,
+        yes_ask,
+        no_price: 1.0 - yes_bid,
         timestamp: Utc::now(),
     };
-    price_map
-        .write()
-        .unwrap()
-        .insert(format!("kalshi:{ticker}"), price);
+    price_map.write().unwrap().insert(format!("kalshi:{ticker}"), price);
+    books.write().unwrap().insert(ticker.to_string(), book);
 }
 
-/// Apply an orderbook delta — only YES side tracked for pricing.
+/// Apply an orderbook delta — update YES or NO side, recompute best bid/ask from book.
+/// Never leaves a stale price when the best bid is consumed.
 fn apply_delta(
     ticker: &str,
     side: &str,
     price_cents: i64,
     delta_qty: i64,
     price_map: &Arc<RwLock<HashMap<String, Price>>>,
+    books: &Arc<RwLock<HashMap<String, KalshiBook>>>,
 ) {
-    if side != "yes" {
-        return;
-    }
     let key = format!("kalshi:{ticker}");
-    let new_yes = price_cents as f64 / 100.0;
+    let mut books_map = books.write().unwrap();
+    let book = match books_map.get_mut(ticker) {
+        Some(b) => b,
+        None => return,  // delta before snapshot — ignore
+    };
+
+    let level = match side {
+        "yes" => book.yes.entry(price_cents).or_insert(0),
+        "no"  => book.no.entry(price_cents).or_insert(0),
+        _     => return,
+    };
+    *level = (*level + delta_qty).max(0);
+
+    let yes_bid_cents = match book.best_yes_bid_cents() {
+        Some(c) => c,
+        None => return,  // book drained — leave last price rather than zeroing
+    };
+    let yes_bid = yes_bid_cents as f64 / 100.0;
+    let yes_ask = book
+        .yes_ask_cents()
+        .map(|c| c as f64 / 100.0)
+        .unwrap_or(yes_bid);
+
+    // Release books write lock before acquiring price_map write lock.
+    drop(books_map);
+
     let mut map = price_map.write().unwrap();
     if let Some(existing) = map.get_mut(&key) {
-        if delta_qty > 0 && new_yes > existing.yes_price {
-            existing.yes_price = new_yes;
-            existing.yes_ask = new_yes;   // placeholder — Task 3 replaces with BTreeMap
-            existing.no_price = 1.0 - new_yes;
-            existing.timestamp = Utc::now();
-        }
-        // If delta removes current best bid, keep stale value (fixed in Task 3)
+        existing.yes_price = yes_bid;
+        existing.yes_ask = yes_ask;
+        existing.no_price = 1.0 - yes_bid;
+        existing.timestamp = Utc::now();
     }
 }
 
@@ -128,6 +184,7 @@ fn handle_ws_message(
     ticker_to_market_id: &HashMap<String, String>,
     price_map: &Arc<RwLock<HashMap<String, Price>>>,
     price_watch_tx: &Arc<watch::Sender<u64>>,
+    books: &Arc<RwLock<HashMap<String, KalshiBook>>>,
 ) {
     let msg_val = match &envelope.msg {
         Some(v) => v,
@@ -146,7 +203,7 @@ fn handle_ws_message(
                     .unwrap_or(ticker.as_str());
                 let yes = snap.yes.unwrap_or_default();
                 let no = snap.no.unwrap_or_default();
-                apply_snapshot(ticker, &yes, &no, market_id, price_map);
+                apply_snapshot(ticker, &yes, &no, market_id, price_map, books);
                 true
             } else {
                 false
@@ -162,6 +219,7 @@ fn handle_ws_message(
                     delta.price,
                     delta.delta,
                     price_map,
+                    books,
                 );
                 true
             } else {
@@ -189,6 +247,7 @@ async fn run_ws_session(
     ticker_to_market_id: &HashMap<String, String>,
     price_map: &Arc<RwLock<HashMap<String, Price>>>,
     price_watch_tx: &Arc<watch::Sender<u64>>,
+    books: &Arc<RwLock<HashMap<String, KalshiBook>>>,
 ) -> anyhow::Result<()> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -245,7 +304,7 @@ async fn run_ws_session(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(env) = serde_json::from_str::<WsEnvelope>(&text) {
-                            handle_ws_message(&env, ticker_to_market_id, price_map, price_watch_tx);
+                            handle_ws_message(&env, ticker_to_market_id, price_map, price_watch_tx, books);
                         }
                     }
                     Some(Ok(Message::Ping(data))) => {
@@ -302,6 +361,10 @@ pub async fn run(
 
     info!("Kalshi WS fetcher starting — {} tickers", tickers.len());
 
+    // Per-ticker BTreeMap orderbooks — survive reconnects so we never lose book state.
+    let books: Arc<RwLock<HashMap<String, KalshiBook>>> =
+        Arc::new(RwLock::new(HashMap::new()));
+
     // Exponential backoff on consecutive errors: 10s → 20s → 40s → 80s → 160s (cap 300s).
     // A clean close resets the error counter and reconnects after 5s.
     let mut consecutive_errors: u32 = 0;
@@ -315,6 +378,7 @@ pub async fn run(
             &ticker_to_market_id,
             &price_map,
             &price_watch_tx,
+            &books,
         )
         .await
         {
@@ -403,18 +467,21 @@ pub fn handle_orderbook(
 mod tests {
     use super::*;
 
+    fn make_books() -> Arc<RwLock<HashMap<String, KalshiBook>>> {
+        Arc::new(RwLock::new(HashMap::new()))
+    }
+
     #[test]
     fn test_apply_snapshot_updates_price_map() {
-        let pm: Arc<RwLock<HashMap<String, Price>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let pm: Arc<RwLock<HashMap<String, Price>>> = Arc::new(RwLock::new(HashMap::new()));
+        let books = make_books();
         let ticker = "TEST-TICKER";
         let market_id = "test-market";
         let yes_levels = [[65i64, 100i64], [60, 200]];
         let no_levels = [[35i64, 100i64]];
-        apply_snapshot(ticker, &yes_levels, &no_levels, market_id, &pm);
+        apply_snapshot(ticker, &yes_levels, &no_levels, market_id, &pm, &books);
         let map = pm.read().unwrap();
         let price = map.get(&format!("kalshi:{ticker}")).unwrap();
-        // best YES bid = 65 cents = 0.65
         assert!(
             (price.yes_price - 0.65).abs() < 0.001,
             "yes_price should be 0.65, got {}",
@@ -429,15 +496,95 @@ mod tests {
 
     #[test]
     fn test_apply_snapshot_ignores_zero_qty() {
-        let pm: Arc<RwLock<HashMap<String, Price>>> =
-            Arc::new(RwLock::new(HashMap::new()));
-        // All YES levels have qty=0 — nothing should be written
+        let pm: Arc<RwLock<HashMap<String, Price>>> = Arc::new(RwLock::new(HashMap::new()));
+        let books = make_books();
         let yes_levels = [[65i64, 0i64], [60, 0]];
-        apply_snapshot("EMPTY", &yes_levels, &[], "empty-market", &pm);
+        apply_snapshot("EMPTY", &yes_levels, &[], "empty-market", &pm, &books);
         let map = pm.read().unwrap();
         assert!(
             map.get("kalshi:EMPTY").is_none(),
             "should not write when all qty=0"
+        );
+    }
+
+    #[test]
+    fn test_apply_delta_consumed_bid_drops_to_next_level() {
+        // Snapshot: YES bids at 65 (qty=100) and 64 (qty=200)
+        // After consuming all qty at 65, best bid must drop to 64
+        let pm: Arc<RwLock<HashMap<String, Price>>> = Arc::new(RwLock::new(HashMap::new()));
+        let books = make_books();
+        let yes = [[65i64, 100i64], [64i64, 200i64]];
+        apply_snapshot("STALE", &yes, &[], "stale-mkt", &pm, &books);
+
+        apply_delta("STALE", "yes", 65, -100, &pm, &books);
+
+        let map = pm.read().unwrap();
+        let price = map.get("kalshi:STALE").unwrap();
+        assert!(
+            (price.yes_price - 0.64).abs() < 0.001,
+            "yes_price must drop to next level 0.64, got {}",
+            price.yes_price
+        );
+    }
+
+    #[test]
+    fn test_apply_delta_positive_qty_raises_best_bid() {
+        let pm: Arc<RwLock<HashMap<String, Price>>> = Arc::new(RwLock::new(HashMap::new()));
+        let books = make_books();
+        let yes = [[65i64, 100i64]];
+        apply_snapshot("RAISE", &yes, &[], "raise-mkt", &pm, &books);
+
+        apply_delta("RAISE", "yes", 70, 50, &pm, &books);
+
+        let map = pm.read().unwrap();
+        let price = map.get("kalshi:RAISE").unwrap();
+        assert!(
+            (price.yes_price - 0.70).abs() < 0.001,
+            "yes_price must rise to 0.70, got {}",
+            price.yes_price
+        );
+    }
+
+    #[test]
+    fn test_yes_ask_computed_from_no_side() {
+        // YES best bid=65¢, NO best bid=33¢ → yes_ask=(100-33)/100=0.67
+        let pm: Arc<RwLock<HashMap<String, Price>>> = Arc::new(RwLock::new(HashMap::new()));
+        let books = make_books();
+        let yes = [[65i64, 100i64]];
+        let no = [[33i64, 100i64]];
+        apply_snapshot("ASK-TEST", &yes, &no, "ask-mkt", &pm, &books);
+
+        let map = pm.read().unwrap();
+        let price = map.get("kalshi:ASK-TEST").unwrap();
+        assert!(
+            (price.yes_price - 0.65).abs() < 0.001,
+            "yes_price (bid) should be 0.65, got {}",
+            price.yes_price
+        );
+        assert!(
+            (price.yes_ask - 0.67).abs() < 0.001,
+            "yes_ask=(100-33)/100=0.67, got {}",
+            price.yes_ask
+        );
+    }
+
+    #[test]
+    fn test_no_delta_updates_yes_ask() {
+        // Start: NO best bid=33¢ → yes_ask=0.67. After delta at NO=35, yes_ask=(100-35)/100=0.65
+        let pm: Arc<RwLock<HashMap<String, Price>>> = Arc::new(RwLock::new(HashMap::new()));
+        let books = make_books();
+        let yes = [[65i64, 100i64]];
+        let no = [[33i64, 100i64]];
+        apply_snapshot("NO-DELTA", &yes, &no, "no-delta-mkt", &pm, &books);
+
+        apply_delta("NO-DELTA", "no", 35, 50, &pm, &books);
+
+        let map = pm.read().unwrap();
+        let price = map.get("kalshi:NO-DELTA").unwrap();
+        assert!(
+            (price.yes_ask - 0.65).abs() < 0.001,
+            "yes_ask must update when NO side changes, got {}",
+            price.yes_ask
         );
     }
 }
