@@ -386,3 +386,26 @@ def test_internal_gap_requires_higher_minimum():
     ok, reason = feed_gap(detector, gap, times=3)
     assert not ok
     assert "8.0" in reason
+
+
+def test_thin_market_rejected_by_liquidity_gate():
+    detector, _ = make_detector({"min_bet_usdc": 10.0})
+    gap = {
+        **BASE_GAP,
+        "poly_liquidity_usdc": 5.0,   # below 10.0 min
+        "kalshi_liquidity_usdc": 20.0,
+    }
+    ok, reason = feed_gap(detector, gap)
+    assert not ok
+    assert "thin" in reason.lower() or "liquidity" in reason.lower()
+
+
+def test_sufficient_liquidity_passes_gate():
+    detector, _ = make_detector({"min_bet_usdc": 10.0})
+    gap = {
+        **BASE_GAP,
+        "poly_liquidity_usdc": 50.0,
+        "kalshi_liquidity_usdc": 80.0,
+    }
+    ok, reason = feed_gap(detector, gap)
+    assert ok, f"Expected pass, got: {reason}"

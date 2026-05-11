@@ -115,6 +115,16 @@ class GapDetector:
                 f"(gap {ev_result['ev_cents']:.2f}¢ gross)"
             )
 
+        # Check 1a: Liquidity gate (populated by Rust comparator from order book depth)
+        poly_liq = gap.get("poly_liquidity_usdc", float("inf"))
+        kalshi_liq = gap.get("kalshi_liquidity_usdc", float("inf"))
+        min_liq = self.config.get("min_bet_usdc", 10.0)
+        if poly_liq < min_liq or kalshi_liq < min_liq:
+            return False, (
+                f"Thin market: poly ${poly_liq:.1f} / kalshi ${kalshi_liq:.1f} "
+                f"< min ${min_liq:.1f}"
+            )
+
         # Check 1b: Per-pair-type minimum gap threshold
         # Internal pairs have a higher bar (negRisk mechanics more complex)
         if pair_type == "internal":

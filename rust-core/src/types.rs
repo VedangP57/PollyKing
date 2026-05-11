@@ -57,6 +57,10 @@ pub struct Gap {
     /// "buy" for Kalshi YES (dir1/internal), "sell" for Kalshi NO (dir2)
     pub kalshi_action: String,
     pub timestamp: String,
+    /// Executable notional at top of Polymarket order book (ask_size × price)
+    pub poly_liquidity_usdc: f64,
+    /// Executable notional at top of Kalshi order book (ask_size × price)
+    pub kalshi_liquidity_usdc: f64,
 }
 
 impl Gap {
@@ -69,6 +73,8 @@ impl Gap {
         kalshi_ticker: String,
         kalshi_action: String,
         gap_cents: f64,
+        poly_liquidity_usdc: f64,
+        kalshi_liquidity_usdc: f64,
     ) -> Self {
         Gap {
             event: "gap_detected".to_string(),
@@ -81,6 +87,8 @@ impl Gap {
             kalshi_ticker,
             kalshi_action,
             timestamp: Utc::now().to_rfc3339(),
+            poly_liquidity_usdc,
+            kalshi_liquidity_usdc,
         }
     }
 }

@@ -90,7 +90,16 @@ fn check_cross_platform(
     let combined1 = poly.no_price + kalshi.yes_ask;
     let gap1 = (1.0 - combined1) * 100.0;
     if gap1 >= config.min_gap_cents && gap1 <= config.max_gap_cents {
-        if pair.no_token_a.is_empty() {
+        // Liquidity: poly NO side uses bid_size (selling YES = buying NO at the NO ask)
+        // kalshi YES ask side uses ask_size
+        let poly_liq1 = poly.bid_size * poly.no_price;
+        let kalshi_liq1 = kalshi.ask_size * kalshi.yes_ask;
+        if poly_liq1 < config.min_bet_usdc || kalshi_liq1 < config.min_bet_usdc {
+            debug!(
+                "CrossPlatform dir1 thin: {} poly_liq={:.1} kalshi_liq={:.1} < min={:.1}",
+                pair.market_id, poly_liq1, kalshi_liq1, config.min_bet_usdc
+            );
+        } else if pair.no_token_a.is_empty() {
             debug!("CrossPlatform dir1 skipped — no_token_a missing for {}", pair.market_id);
         } else {
             debug!(
@@ -106,6 +115,8 @@ fn check_cross_platform(
                 pair.token_b.clone(),
                 "buy".into(),
                 gap1,
+                poly_liq1,
+                kalshi_liq1,
             );
             let _ = gap_tx.try_send(gap);
         }
@@ -117,21 +128,32 @@ fn check_cross_platform(
     let combined2 = poly.yes_ask + kalshi.no_price;
     let gap2 = (1.0 - combined2) * 100.0;
     if gap2 >= config.min_gap_cents && gap2 <= config.max_gap_cents {
-        debug!(
-            "CrossPlatform dir2: {} | PolyYES(ask):{:.4} KalshiNO:{:.4} | {:.1}c",
-            pair.market_id, poly.yes_ask, kalshi.no_price, gap2
-        );
-        let gap = Gap::new(
-            "cross_platform".into(),
-            format!("{}-rev", pair.market_id),
-            poly.yes_ask,      // execution price: buy Poly YES (crosses YES ask)
-            kalshi.no_price,   // execution price: buy Kalshi NO (crosses NO ask)
-            pair.token_a.clone(),
-            pair.token_b.clone(),
-            "sell".into(),     // sell Kalshi YES = buy Kalshi NO
-            gap2,
-        );
-        let _ = gap_tx.try_send(gap);
+        let poly_liq2 = poly.ask_size * poly.yes_ask;
+        let kalshi_liq2 = kalshi.bid_size * kalshi.no_price;
+        if poly_liq2 < config.min_bet_usdc || kalshi_liq2 < config.min_bet_usdc {
+            debug!(
+                "CrossPlatform dir2 thin: {} poly_liq={:.1} kalshi_liq={:.1} < min={:.1}",
+                pair.market_id, poly_liq2, kalshi_liq2, config.min_bet_usdc
+            );
+        } else {
+            debug!(
+                "CrossPlatform dir2: {} | PolyYES(ask):{:.4} KalshiNO:{:.4} | {:.1}c",
+                pair.market_id, poly.yes_ask, kalshi.no_price, gap2
+            );
+            let gap = Gap::new(
+                "cross_platform".into(),
+                format!("{}-rev", pair.market_id),
+                poly.yes_ask,      // execution price: buy Poly YES (crosses YES ask)
+                kalshi.no_price,   // execution price: buy Kalshi NO (crosses NO ask)
+                pair.token_a.clone(),
+                pair.token_b.clone(),
+                "sell".into(),     // sell Kalshi YES = buy Kalshi NO
+                gap2,
+                poly_liq2,
+                kalshi_liq2,
+            );
+            let _ = gap_tx.try_send(gap);
+        }
     }
 }
 
@@ -155,6 +177,15 @@ fn check_internal(
     let gap_cents = (1.0 - combined) * 100.0;
 
     if gap_cents >= config.min_gap_cents && gap_cents <= config.max_gap_cents {
+        let poly_liq = price_a.ask_size * price_a.yes_price;
+        let b_liq = price_b.ask_size * price_b.yes_price;
+        if poly_liq < config.min_bet_usdc || b_liq < config.min_bet_usdc {
+            debug!(
+                "Internal thin: {} poly_liq={:.1} b_liq={:.1} < min={:.1}",
+                pair.market_id, poly_liq, b_liq, config.min_bet_usdc
+            );
+            return;
+        }
         debug!(
             "Internal gap: {} | A:{:.2} B:{:.2} | {:.1}c",
             pair.market_id, price_a.yes_price, price_b.yes_price, gap_cents
@@ -168,6 +199,8 @@ fn check_internal(
             pair.token_b.clone(),
             "buy".into(),
             gap_cents,
+            poly_liq,
+            b_liq,
         );
         let _ = gap_tx.try_send(gap);
     }
@@ -278,5 +311,54 @@ mod tests {
             rx.try_recv().is_err(),
             "dir2 must use poly.yes_ask (0.60), not yes_price bid (0.55) — bid gap is an illusion"
         );
+    }
+
+    #[test]
+    fn test_thin_market_gap_not_emitted_when_below_threshold() {
+        // Both sides have ask_size=0 → liquidity gate must suppress the gap
+        // even though the price gap is valid (poly.no_price=0.39, kalshi.yes_ask=0.50 → gap=11¢)
+        let mut map = HashMap::new();
+        let mut poly = make_price(Platform::Polymarket, 0.61, 0.61);
+        poly.ask_size = 0.0;   // no ask liquidity on poly
+        let mut kalshi = make_price(Platform::Kalshi, 0.50, 0.50);
+        kalshi.ask_size = 0.0; // no ask liquidity on kalshi
+        map.insert("poly:tok-yes".into(), poly);
+        map.insert("kalshi:TICK-A".into(), kalshi);
+
+        let (pair, keys) = make_pair();
+        let config = make_config(); // min_bet_usdc=10.0
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        check_cross_platform(&pair, &keys, &map, &config, &tx);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "thin market (ask_size=0) must not emit a gap"
+        );
+    }
+
+    #[test]
+    fn test_liquid_market_gap_emitted_with_liquidity_fields() {
+        // poly: no_price=0.50, ask_size=200 → poly_liq=200*0.50=100
+        // kalshi: yes_ask=0.40, ask_size=200 → kalshi_liq=200*0.40=80
+        // gap = (1 - 0.50 - 0.40)*100 = 10¢ → above 5¢ threshold
+        // Both liq > min_bet_usdc(10) → gap emitted
+        let mut map = HashMap::new();
+        let mut poly = make_price(Platform::Polymarket, 0.50, 0.50);
+        poly.ask_size = 200.0;
+        let mut kalshi = make_price(Platform::Kalshi, 0.55, 0.40);
+        kalshi.ask_size = 200.0;
+        map.insert("poly:tok-yes".into(), poly);
+        map.insert("kalshi:TICK-A".into(), kalshi);
+
+        let (pair, keys) = make_pair();
+        let config = make_config();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        check_cross_platform(&pair, &keys, &map, &config, &tx);
+
+        let gap = rx.try_recv().expect("liquid market with valid gap must be emitted");
+        assert!(gap.poly_liquidity_usdc >= 10.0, "poly_liquidity_usdc should be >= min_bet");
+        assert!(gap.kalshi_liquidity_usdc >= 10.0, "kalshi_liquidity_usdc should be >= min_bet");
     }
 }

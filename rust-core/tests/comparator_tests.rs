@@ -47,6 +47,8 @@ fn test_gap_has_kalshi_action_field() {
         "KXTEST".into(),
         "buy".into(),
         8.0,
+        50.0,
+        30.0,
     );
     assert_eq!(g.kalshi_action, "buy");
     assert_eq!(g.polymarket_token, "no_token_hex");
@@ -63,6 +65,8 @@ fn test_direction2_gap_uses_sell_action() {
         "KXTEST".into(),
         "sell".into(),
         7.0,
+        40.0,
+        60.0,
     );
     assert_eq!(g.kalshi_action, "sell");
     assert_eq!(g.polymarket_token, "yes_token_hex");
