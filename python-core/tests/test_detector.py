@@ -234,7 +234,9 @@ class TestDuplicateExecution:
         assert is_valid, f"Expected valid after resolved trade, got: {reason}"
 
     def test_different_market_not_blocked(self):
-        detector, conn = make_detector()
+        # Use a high daily loss limit so the $50 open position doesn't trigger it —
+        # this test only checks market-level dedup isolation, not loss limits.
+        detector, conn = make_detector({"max_daily_loss_usdc": 500.0})
         cur = conn.execute(
             """INSERT INTO gaps (market_id, polymarket_price, kalshi_price, gap_cents,
                confidence, detected_at) VALUES (?,?,?,?,?,datetime('now'))""",
