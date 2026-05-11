@@ -1,3 +1,4 @@
+import os as _os
 import sys
 import time
 from loguru import logger
@@ -15,6 +16,16 @@ logger.add(
     format="<dim>[{time:HH:mm:ss}]</dim> <level>{level:<5}</level> | {message}",
     colorize=True,
     level="DEBUG",
+)
+_log_dir = _os.getenv("LOG_DIR", "logs")
+_os.makedirs(_log_dir, exist_ok=True)
+logger.add(
+    f"{_log_dir}/arb_structured.jsonl",
+    format="{time:YYYY-MM-DDTHH:mm:ss.SSSZ} {level} {message}",
+    serialize=True,
+    rotation="100 MB",
+    retention="7 days",
+    level="INFO",
 )
 
 

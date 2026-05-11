@@ -185,6 +185,12 @@ async def main():
     _prom_start(9090)
     notifier.logger.info("Prometheus metrics server started on :9090")
 
+    from health import HealthServer as _HealthServer
+    _health_state: dict = {"last_gap_seen": 0.0, "ws_connected": [], "open_positions": 0}
+    _health_server = _HealthServer(_health_state, port=8080)
+    await _health_server.start()
+    notifier.logger.info("Health server started on :8080")
+
     stdout_queue: asyncio.Queue = asyncio.Queue()
 
     executor = TwoLegExecutor(CONFIG, db_conn)
@@ -198,12 +204,12 @@ async def main():
     asyncio.create_task(reconciler.run_forever())
 
     asyncio.create_task(_read_stderr(rust_process.stderr))
-    asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn, bayes_engine, fee_rate_map))
+    asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn, bayes_engine, fee_rate_map, _health_state))
 
     await rust_process.wait()
 
 
-async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, db_conn, bayes_engine: BayesEngine, fee_rate_map: dict):
+async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, db_conn, bayes_engine: BayesEngine, fee_rate_map: dict, health_state: dict | None = None):
     async for line in stdout:
         text = line.decode().strip()
         if not text:
@@ -223,15 +229,17 @@ async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, 
         elif event_type == "gap_detected":
             # Fire-and-forget: _handle_gap calls TwoLegExecutor directly.
             # We do not block here so _read_stdout can keep draining Rust stdout.
-            asyncio.create_task(_handle_gap(event, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map))
+            asyncio.create_task(_handle_gap(event, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map, health_state))
 
 
-async def _handle_gap(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict):
+async def _handle_gap(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict, health_state: dict | None = None):
     async with _GAP_SEMAPHORE:
-        await _handle_gap_inner(gap, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map)
+        await _handle_gap_inner(gap, detector, executor, db_conn, stdout_queue, bayes_engine, fee_rate_map, health_state)
 
 
-async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict):
+async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegExecutor, db_conn, stdout_queue, bayes_engine: BayesEngine, fee_rate_map: dict, health_state: dict | None = None):
+    if health_state is not None:
+        health_state["last_gap_seen"] = _time.monotonic()
     notifier.gap_detected(gap)
 
     market_id = gap["market_id"]
