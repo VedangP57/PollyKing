@@ -84,6 +84,7 @@ fn apply_snapshot(
         market_id: market_id.to_string(),
         platform: Platform::Kalshi,
         yes_price,
+        yes_ask: yes_price,   // updated in Task 3 to derive from NO-side orderbook
         no_price: 1.0 - yes_price,
         timestamp: Utc::now(),
     };
@@ -110,10 +111,11 @@ fn apply_delta(
     if let Some(existing) = map.get_mut(&key) {
         if delta_qty > 0 && new_yes > existing.yes_price {
             existing.yes_price = new_yes;
+            existing.yes_ask = new_yes;   // placeholder — Task 3 replaces with BTreeMap
             existing.no_price = 1.0 - new_yes;
             existing.timestamp = Utc::now();
         }
-        // If delta removes current best bid, keep stale value (safer than zeroing)
+        // If delta removes current best bid, keep stale value (fixed in Task 3)
     }
 }
 
@@ -380,6 +382,7 @@ pub fn handle_orderbook(
         market_id: pair.market_id.clone(),
         platform: Platform::Kalshi,
         yes_price,
+        yes_ask: yes_price,   // legacy REST helper — best bid only
         no_price: 1.0 - yes_price,
         timestamp: Utc::now(),
     };

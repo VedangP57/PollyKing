@@ -87,6 +87,7 @@ pub fn handle_price_message(
                 market_id: asset_id.to_string(),
                 platform: Platform::Polymarket,
                 yes_price: bid_price,
+                yes_ask: bid_price,   // updated in Task 2 to parse ask_price from event
                 no_price: 1.0 - bid_price,
                 timestamp: Utc::now(),
             },
@@ -144,6 +145,7 @@ async fn fetch_batch(
                 market_id: token_id.clone(),
                 platform: Platform::Polymarket,
                 yes_price,
+                yes_ask: yes_price,   // REST warm-up — no ask data, fall back to bid
                 no_price: 1.0 - yes_price,
                 timestamp: Utc::now(),
             },
