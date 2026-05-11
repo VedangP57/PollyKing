@@ -85,23 +85,23 @@ fn check_cross_platform(
     };
 
     // Direction 1: Buy Poly NO + Buy Kalshi YES
-    // combined = poly.no_price + kalshi.yes_price
-    let combined1 = poly.no_price + kalshi.yes_price;
+    // poly.no_price = 1 - poly.yes_price = NO ask (correct: buying NO crosses the NO book)
+    // kalshi.yes_ask = execution price for buying Kalshi YES (taker crosses the YES ask)
+    let combined1 = poly.no_price + kalshi.yes_ask;
     let gap1 = (1.0 - combined1) * 100.0;
     if gap1 >= config.min_gap_cents && gap1 <= config.max_gap_cents {
         if pair.no_token_a.is_empty() {
-            // no_token_a not populated — skip to avoid buying wrong side
             debug!("CrossPlatform dir1 skipped — no_token_a missing for {}", pair.market_id);
         } else {
             debug!(
-                "CrossPlatform dir1: {} | PolyNO:{:.4} KalshiYES:{:.4} | {:.1}c",
-                pair.market_id, poly.no_price, kalshi.yes_price, gap1
+                "CrossPlatform dir1: {} | PolyNO:{:.4} KalshiYES(ask):{:.4} | {:.1}c",
+                pair.market_id, poly.no_price, kalshi.yes_ask, gap1
             );
             let gap = Gap::new(
                 "cross_platform".into(),
                 pair.market_id.clone(),
-                poly.no_price,      // price of the token being bought (NO)
-                kalshi.yes_price,   // price of the Kalshi side (YES)
+                poly.no_price,    // execution price: buy Poly NO (crosses NO ask)
+                kalshi.yes_ask,   // execution price: buy Kalshi YES (crosses YES ask)
                 pair.no_token_a.clone(),
                 pair.token_b.clone(),
                 "buy".into(),
@@ -112,19 +112,20 @@ fn check_cross_platform(
     }
 
     // Direction 2: Buy Poly YES + Buy Kalshi NO (= sell Kalshi YES)
-    // combined = poly.yes_price + kalshi.no_price
-    let combined2 = poly.yes_price + kalshi.no_price;
+    // poly.yes_ask = execution price for buying Poly YES (taker crosses the YES ask)
+    // kalshi.no_price = 1 - kalshi.yes_price = Kalshi NO ask (crosses NO book)
+    let combined2 = poly.yes_ask + kalshi.no_price;
     let gap2 = (1.0 - combined2) * 100.0;
     if gap2 >= config.min_gap_cents && gap2 <= config.max_gap_cents {
         debug!(
-            "CrossPlatform dir2: {} | PolyYES:{:.4} KalshiNO:{:.4} | {:.1}c",
-            pair.market_id, poly.yes_price, kalshi.no_price, gap2
+            "CrossPlatform dir2: {} | PolyYES(ask):{:.4} KalshiNO:{:.4} | {:.1}c",
+            pair.market_id, poly.yes_ask, kalshi.no_price, gap2
         );
         let gap = Gap::new(
             "cross_platform".into(),
             format!("{}-rev", pair.market_id),
-            poly.yes_price,    // price of the token being bought (YES)
-            kalshi.no_price,   // price of the Kalshi side (NO)
+            poly.yes_ask,      // execution price: buy Poly YES (crosses YES ask)
+            kalshi.no_price,   // execution price: buy Kalshi NO (crosses NO ask)
             pair.token_a.clone(),
             pair.token_b.clone(),
             "sell".into(),     // sell Kalshi YES = buy Kalshi NO
@@ -174,4 +175,106 @@ fn check_internal(
 
 pub fn compute_gap_cents(price_a: f64, price_b: f64) -> f64 {
     (1.0 - (price_a + price_b)) * 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{Platform, Price};
+    use chrono::Utc;
+
+    fn make_config() -> AppConfig {
+        AppConfig {
+            dry_run: true,
+            min_gap_cents: 5.0,
+            max_gap_cents: 30.0,
+            min_bet_usdc: 10.0,
+            max_bet_usdc: 100.0,
+            max_daily_loss_usdc: 50.0,
+            max_open_positions: 5,
+            polymarket_ws_url: String::new(),
+            polymarket_clob_url: String::new(),
+            polymarket_gamma_url: String::new(),
+            kalshi_ws_url: String::new(),
+            kalshi_api_url: String::new(),
+            polymarket_api_key: String::new(),
+            polymarket_private_key: String::new(),
+            kalshi_api_key: String::new(),
+            kalshi_api_secret: String::new(),
+        }
+    }
+
+    fn make_price(platform: Platform, yes_bid: f64, yes_ask: f64) -> Price {
+        Price {
+            market_id: "test".into(),
+            platform,
+            yes_price: yes_bid,
+            yes_ask,
+            no_price: 1.0 - yes_bid,
+            timestamp: Utc::now(),
+        }
+    }
+
+    fn make_pair() -> (MarketPair, PairKeys) {
+        let pair = MarketPair {
+            pair_type: PairType::CrossPlatform,
+            token_a: "tok-yes".into(),
+            no_token_a: "tok-no".into(),
+            token_b: "TICK-A".into(),
+            market_id: "test-market".into(),
+            gamma_id_a: String::new(),
+            gamma_id_b: String::new(),
+        };
+        let keys = PairKeys {
+            key_a: "poly:tok-yes".into(),
+            key_b: "kalshi:TICK-A".into(),
+        };
+        (pair, keys)
+    }
+
+    #[test]
+    fn test_dir1_gap_uses_kalshi_yes_ask_not_bid() {
+        // Direction 1: Buy Poly NO + Buy Kalshi YES
+        // kalshi bid=0.55, ask=0.60 — spread of 5¢
+        // poly.no_price = 1 - 0.61 = 0.39
+        // combined using bid: 0.39 + 0.55 = 0.94 → 6¢ (old code detects this — wrong)
+        // combined using ask: 0.39 + 0.60 = 0.99 → 1¢ (below 5¢ threshold — no gap)
+        let mut map = HashMap::new();
+        map.insert("poly:tok-yes".into(), make_price(Platform::Polymarket, 0.61, 0.61));
+        map.insert("kalshi:TICK-A".into(), make_price(Platform::Kalshi, 0.55, 0.60));
+
+        let (pair, keys) = make_pair();
+        let config = make_config();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        check_cross_platform(&pair, &keys, &map, &config, &tx);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "dir1 must use kalshi.yes_ask (0.60), not yes_price bid (0.55) — bid gap is an illusion"
+        );
+    }
+
+    #[test]
+    fn test_dir2_gap_uses_poly_yes_ask_not_bid() {
+        // Direction 2: Buy Poly YES + Buy Kalshi NO
+        // poly bid=0.55, ask=0.60 — spread of 5¢
+        // kalshi.no_price = 1 - 0.61 = 0.39
+        // combined using bid: 0.55 + 0.39 = 0.94 → 6¢ (old code detects this — wrong)
+        // combined using ask: 0.60 + 0.39 = 0.99 → 1¢ (below 5¢ threshold — no gap)
+        let mut map = HashMap::new();
+        map.insert("poly:tok-yes".into(), make_price(Platform::Polymarket, 0.55, 0.60));
+        map.insert("kalshi:TICK-A".into(), make_price(Platform::Kalshi, 0.61, 0.61));
+
+        let (pair, keys) = make_pair();
+        let config = make_config();
+        let (tx, rx) = crossbeam_channel::unbounded();
+
+        check_cross_platform(&pair, &keys, &map, &config, &tx);
+
+        assert!(
+            rx.try_recv().is_err(),
+            "dir2 must use poly.yes_ask (0.60), not yes_price bid (0.55) — bid gap is an illusion"
+        );
+    }
 }
