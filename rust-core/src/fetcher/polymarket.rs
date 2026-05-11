@@ -20,7 +20,7 @@ const STALE_THRESHOLD_SECS: i64 = 120;
 const REST_BATCH_SIZE: usize = 100;
 
 // ---------------------------------------------------------------------------
-// Public helpers — stubs (filled in Task 2)
+// Public helpers
 // ---------------------------------------------------------------------------
 
 pub fn build_subscription_message(token_ids: &[String]) -> String {
@@ -55,7 +55,7 @@ pub fn handle_price_message(
         Err(_) => return,
     };
 
-    // Polymarket can send either a single object or a JSON array of events.
+    // Polymarket sends either a single object or a JSON array of events.
     let messages: Vec<Value> = if val.is_array() {
         val.as_array().cloned().unwrap_or_default()
     } else {
@@ -95,22 +95,296 @@ pub fn handle_price_message(
     }
 
     if updated {
+        // Evaluate borrow() into a local before send() to release the read lock
+        // before send() tries to acquire the write lock on the same RwLock.
         let next = *price_watch_tx.borrow() + 1;
         let _ = price_watch_tx.send(next);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Public entry point — stub (filled in Task 4)
+// Private helpers — REST warm-up + stale fallback
+// ---------------------------------------------------------------------------
+
+async fn fetch_batch(
+    client: &reqwest::Client,
+    url: &str,
+    gamma_to_token: &HashMap<String, String>,
+    price_map: &Arc<RwLock<HashMap<String, Price>>>,
+) -> Result<usize> {
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow::anyhow!("HTTP {}", resp.status()));
+    }
+    let markets: Value = resp.json().await?;
+    let markets = match markets.as_array() {
+        Some(a) => a.clone(),
+        None => markets["data"].as_array().cloned().unwrap_or_default(),
+    };
+
+    let mut count = 0usize;
+    let mut map = price_map.write().unwrap();
+    for market in &markets {
+        let gamma_id = market["id"].as_str().unwrap_or_default();
+        let token_id = match gamma_to_token.get(gamma_id) {
+            Some(t) => t,
+            None => continue,
+        };
+        let yes_price: f64 = market["outcomePrices"]
+            .as_str()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
+            .and_then(|v| v.first()?.parse().ok())
+            .unwrap_or(0.0);
+        if yes_price == 0.0 {
+            continue;
+        }
+        map.insert(
+            format!("poly:{token_id}"),
+            Price {
+                market_id: token_id.clone(),
+                platform: Platform::Polymarket,
+                yes_price,
+                no_price: 1.0 - yes_price,
+                timestamp: Utc::now(),
+            },
+        );
+        count += 1;
+    }
+    Ok(count)
+}
+
+// ---------------------------------------------------------------------------
+// Private helpers — WS session + reconnect loop
+// ---------------------------------------------------------------------------
+
+/// Runs one WebSocket session to completion (close or error).
+/// Returns the list of dynamically added tokens so the caller can re-subscribe
+/// them on the next reconnect.
+async fn run_ws_session(
+    tokens: &[String],
+    price_map: &Arc<RwLock<HashMap<String, Price>>>,
+    price_watch_tx: &Arc<watch::Sender<u64>>,
+    sub_rx: &mut mpsc::Receiver<Vec<String>>,
+) -> Result<Vec<String>> {
+    let mut added: Vec<String> = Vec::new();
+
+    let (mut ws_stream, _) = connect_async(WS_URL)
+        .await
+        .map_err(|e| anyhow::anyhow!("Polymarket WS connect failed: {e}"))?;
+
+    info!("Polymarket WS session connected ({} tokens)", tokens.len());
+
+    ws_stream
+        .send(Message::Text(build_subscription_message(tokens)))
+        .await
+        .map_err(|e| anyhow::anyhow!("WS subscribe failed: {e}"))?;
+
+    let mut hb = tokio::time::interval(Duration::from_secs(HEARTBEAT_SECS));
+    hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            msg = ws_stream.next() => match msg {
+                Some(Ok(Message::Text(text))) => {
+                    handle_price_message(&text, price_map, price_watch_tx);
+                }
+                Some(Ok(Message::Ping(data))) => {
+                    let _ = ws_stream.send(Message::Pong(data)).await;
+                }
+                Some(Ok(Message::Close(_))) | None => {
+                    info!("Polymarket WS connection closed");
+                    return Ok(added);
+                }
+                Some(Err(e)) => {
+                    return Err(anyhow::anyhow!("WS read error: {e}"));
+                }
+                Some(Ok(Message::Binary(_))) => {
+                    warn!("Polymarket WS: unexpected binary frame — ignoring");
+                }
+                _ => {}
+            },
+            _ = hb.tick() => {
+                let _ = ws_stream.send(Message::Text("PING".to_string())).await;
+            }
+            Some(new_tokens) = sub_rx.recv() => {
+                let dyn_msg = build_dynamic_subscribe_message(&new_tokens);
+                if let Err(e) = ws_stream.send(Message::Text(dyn_msg)).await {
+                    warn!("Dynamic subscribe send failed: {e}");
+                } else {
+                    added.extend(new_tokens);
+                }
+            }
+        }
+    }
+}
+
+/// Owns one WS connection lifecycle: initial tokens, dynamic additions, reconnect.
+/// Never returns in normal operation. Spawned as a tokio task per chunk.
+async fn run_connection(
+    initial_tokens: Vec<String>,
+    price_map: Arc<RwLock<HashMap<String, Price>>>,
+    price_watch_tx: Arc<watch::Sender<u64>>,
+    mut sub_rx: mpsc::Receiver<Vec<String>>,
+) {
+    let mut all_tokens = initial_tokens;
+    let mut consecutive_errors: u32 = 0;
+
+    loop {
+        match run_ws_session(&all_tokens, &price_map, &price_watch_tx, &mut sub_rx).await {
+            Ok(added) => {
+                all_tokens.extend(added);
+                consecutive_errors = 0;
+                info!("Polymarket WS session ended cleanly — reconnecting in 5s");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+            Err(e) => {
+                consecutive_errors += 1;
+                let backoff = std::cmp::min(5 * (1u64 << (consecutive_errors - 1).min(6)), 300);
+                if consecutive_errors >= 5 {
+                    log::error!(
+                        "Polymarket WS: {consecutive_errors} consecutive failures — \
+                         retrying in {backoff}s. Last error: {e}"
+                    );
+                } else {
+                    warn!(
+                        "Polymarket WS error (attempt {consecutive_errors}): {e} — \
+                         retrying in {backoff}s"
+                    );
+                }
+                tokio::time::sleep(Duration::from_secs(backoff)).await;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public entry point
 // ---------------------------------------------------------------------------
 
 pub async fn run(
-    _gamma_url: String,
-    _token_to_gamma: HashMap<String, String>,
-    _price_map: Arc<RwLock<HashMap<String, Price>>>,
-    _price_watch_tx: Arc<watch::Sender<u64>>,
+    gamma_url: String,
+    token_to_gamma: HashMap<String, String>,
+    price_map: Arc<RwLock<HashMap<String, Price>>>,
+    price_watch_tx: Arc<watch::Sender<u64>>,
 ) -> Result<()> {
-    todo!("implement run")
+    if token_to_gamma.is_empty() {
+        info!("Polymarket: no tokens to track — WS pool idle.");
+        return Ok(());
+    }
+
+    // Invert token_id → gamma_id into gamma_id → token_id for REST URL construction.
+    let gamma_to_token: HashMap<String, String> = token_to_gamma
+        .iter()
+        .filter(|(tok, gid)| !tok.is_empty() && !gid.is_empty())
+        .map(|(tok, gid)| (gid.clone(), tok.clone()))
+        .collect();
+    let gamma_ids: Vec<String> = gamma_to_token.keys().cloned().collect();
+
+    // REST warm-up: pre-populate price_map before the first WS connection arrives.
+    info!("Polymarket: REST warm-up for {} markets", gamma_ids.len());
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+    for chunk in gamma_ids.chunks(REST_BATCH_SIZE) {
+        let query = chunk
+            .iter()
+            .map(|id| format!("id={id}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        let url = format!("{}/markets?{query}", gamma_url.trim_end_matches('/'));
+        if let Err(e) = fetch_batch(&client, &url, &gamma_to_token, &price_map).await {
+            warn!("REST warm-up batch error: {e}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    info!("Polymarket REST warm-up complete — starting WS pool");
+
+    // Chunk tokens and spawn one persistent connection per chunk.
+    let token_ids: Vec<String> = token_to_gamma
+        .keys()
+        .filter(|t| !t.is_empty())
+        .cloned()
+        .collect();
+    let chunks: Vec<Vec<String>> = token_ids.chunks(CHUNK_SIZE).map(|c| c.to_vec()).collect();
+    info!(
+        "Polymarket WS pool: {} connections for {} tokens",
+        chunks.len(),
+        token_ids.len()
+    );
+
+    let mut handles = Vec::with_capacity(chunks.len());
+    // _dyn_senders kept alive so connection tasks can receive dynamic subscriptions.
+    let mut _dyn_senders: Vec<mpsc::Sender<Vec<String>>> = Vec::with_capacity(chunks.len());
+
+    for chunk in chunks {
+        let (sub_tx, sub_rx) = mpsc::channel::<Vec<String>>(32);
+        _dyn_senders.push(sub_tx);
+        let pm = Arc::clone(&price_map);
+        let ptx = Arc::clone(&price_watch_tx);
+        handles.push(tokio::spawn(async move {
+            run_connection(chunk, pm, ptx, sub_rx).await
+        }));
+    }
+
+    // Stale price safety net: REST-refresh any token silent > STALE_THRESHOLD_SECS.
+    {
+        let stale_pm = Arc::clone(&price_map);
+        let stale_g2t = gamma_to_token.clone();
+        let stale_url = gamma_url.clone();
+        let stale_client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()?;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(STALE_CHECK_SECS));
+            loop {
+                interval.tick().await;
+                let threshold =
+                    Utc::now() - chrono::Duration::seconds(STALE_THRESHOLD_SECS);
+                // stale_g2t: gamma_id → token_id; price_map keys are "poly:{token_id}"
+                let stale_gids: Vec<String> = {
+                    let map = stale_pm.read().unwrap();
+                    stale_g2t
+                        .iter()
+                        .filter(|(_, token_id)| {
+                            map.get(&format!("poly:{token_id}"))
+                                .map(|p| p.timestamp < threshold)
+                                .unwrap_or(true) // never-updated counts as stale
+                        })
+                        .map(|(gamma_id, _)| gamma_id.clone())
+                        .collect()
+                };
+                if stale_gids.is_empty() {
+                    continue;
+                }
+                warn!(
+                    "Polymarket stale: {} tokens silent > {}s — REST refresh",
+                    stale_gids.len(),
+                    STALE_THRESHOLD_SECS
+                );
+                for chunk in stale_gids.chunks(REST_BATCH_SIZE) {
+                    let query = chunk
+                        .iter()
+                        .map(|id| format!("id={id}"))
+                        .collect::<Vec<_>>()
+                        .join("&");
+                    let url =
+                        format!("{}/markets?{query}", stale_url.trim_end_matches('/'));
+                    if let Err(e) =
+                        fetch_batch(&stale_client, &url, &stale_g2t, &stale_pm).await
+                    {
+                        warn!("Stale refresh error: {e}");
+                    }
+                }
+            }
+        });
+    }
+
+    // run() never returns in normal operation — all connection tasks loop forever.
+    for handle in handles {
+        let _ = handle.await;
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
