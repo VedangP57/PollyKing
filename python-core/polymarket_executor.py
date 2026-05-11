@@ -2,6 +2,7 @@ import asyncio
 from typing import Optional
 
 from py_clob_client_v2 import ClobClient, OrderArgs, PartialCreateOrderOptions
+from py_clob_client_v2.clob_types import OrderPayload
 from py_clob_client_v2.order_builder.constants import BUY, SELL
 
 from kalshi_executor import ExecutorError
@@ -104,11 +105,22 @@ class PolymarketExecutor:
         client.create_and_post_order(order_args, options=options)
 
     def _get_balance_sync(self) -> float:
-        """Return available USDC balance from Polymarket CLOB API."""
+        """Return available USDC balance from Polymarket CLOB API.
+
+        SDK exposes get_balance_allowance() — USDC (collateral) balance is under
+        asset_type=COLLATERAL. Returns the "balance" field in units of USDC (6 decimals
+        on-chain, but the CLOB API normalises to human-readable dollars).
+        """
+        from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
         client = self._get_client()
-        resp = client.get_balance()
+        resp = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
         if isinstance(resp, dict):
-            return float(resp.get("balance", resp.get("usdc", 0.0)))
+            # API returns balance as string of raw uint256 (6 decimal USDC)
+            raw = resp.get("balance", "0")
+            try:
+                return float(raw) / 1_000_000  # convert from 6-decimal USDC
+            except (TypeError, ValueError):
+                return 0.0
         return 0.0
 
     async def get_balance(self) -> float:
@@ -116,11 +128,13 @@ class PolymarketExecutor:
         return await loop.run_in_executor(None, self._get_balance_sync)
 
     def _get_positions_sync(self) -> list[dict]:
-        """Return open positions from Polymarket CLOB API."""
+        """Return open orders (active positions) from Polymarket CLOB API.
+
+        SDK has no get_positions() — get_open_orders() returns all resting/open orders
+        which is the correct proxy for detecting unclosed positions on restart.
+        """
         client = self._get_client()
-        resp = client.get_positions()
-        if isinstance(resp, dict):
-            return resp.get("positions", [])
+        resp = client.get_open_orders()
         if isinstance(resp, list):
             return resp
         return []
@@ -139,7 +153,7 @@ class PolymarketExecutor:
 
     def _cancel_order_sync(self, order_id: str) -> None:
         client = self._get_client()
-        client.cancel(order_id)
+        client.cancel_order(OrderPayload(orderID=order_id))
 
     async def get_order_status(self, order_id: str) -> str:
         loop = asyncio.get_event_loop()
@@ -173,3 +187,19 @@ class PolymarketExecutor:
         await loop.run_in_executor(
             None, self._close_sync, token_id, price, amount_usdc, neg_risk
         )
+
+    def _get_fill_details_sync(self, order_id: str) -> Optional[float]:
+        """Return average fill price for a matched Polymarket order, or None on error."""
+        try:
+            client = self._get_client()
+            resp = client.get_order(order_id)
+            if isinstance(resp, dict):
+                avg = resp.get("avgPrice") or resp.get("price") or resp.get("orderPrice")
+                return float(avg) if avg is not None else None
+        except Exception:
+            return None
+        return None
+
+    async def get_fill_details(self, order_id: str) -> Optional[float]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_fill_details_sync, order_id)

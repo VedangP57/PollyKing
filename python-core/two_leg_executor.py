@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sqlite3
 import time as _time
+from datetime import datetime, timezone
 from typing import Optional
 
 import metrics as _metrics
@@ -9,7 +10,7 @@ from execution_policy import decide as _policy_decide
 from kalshi_executor import ExecutorError, KalshiExecutor
 from kelly_engine import compute_arb_kelly_size
 from polymarket_executor import PolymarketExecutor
-from tracker import log_emergency_position
+from tracker import log_emergency_position, log_execution_event, update_execution_fill
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +100,20 @@ class TwoLegExecutor:
         if self._config.get("dry_run", True):
             return self._dry_run_confirmation(gap, bet_size)
 
+        # Capture signal prices at decision time — before any exchange latency
+        _signal_at = datetime.now(timezone.utc).isoformat()
+        _signal_snap = {
+            "market_id": gap.get("market_id", ""),
+            "pair_type": gap.get("pair_type", "cross_platform"),
+            "opp_id": gap.get("opp_id"),
+            "signal_poly_price": gap.get("polymarket_price"),
+            "signal_kalshi_price": gap.get("kalshi_price"),
+            "signal_gap_cents": gap.get("gap_cents"),
+            "signal_poly_liquidity": gap.get("poly_liquidity_usdc"),
+            "signal_kalshi_liquidity": gap.get("kalshi_liquidity_usdc"),
+            "signal_at": _signal_at,
+        }
+
         # Determine order urgency — urgent gaps use aggressive pricing (+0.03 buffer)
         policy = _policy_decide(gap)
         price_buffer = 0.03 if policy.urgency == "high" else 0.0
@@ -130,8 +145,26 @@ class TwoLegExecutor:
             log.warning("Balance check failed (%s) — proceeding anyway", e)
 
         if pair_type == "internal":
-            return await self._execute_internal(gap, bet_size, price_buffer)
-        return await self._execute_cross_platform(gap, bet_size, price_buffer)
+            result = await self._execute_internal(gap, bet_size, price_buffer)
+        else:
+            result = await self._execute_cross_platform(gap, bet_size, price_buffer)
+
+        if result is not None:
+            _submitted_at = datetime.now(timezone.utc).isoformat()
+            exec_evt = {
+                **_signal_snap,
+                "submitted_poly_price": gap.get("polymarket_price"),
+                "submitted_kalshi_price": gap.get("kalshi_price"),
+                "price_buffer_applied": price_buffer,
+                "submitted_at": _submitted_at,
+                "urgency": policy.urgency,
+            }
+            try:
+                log_execution_event(self._db, exec_evt)
+            except Exception:
+                pass  # telemetry is non-fatal
+
+        return result
 
     async def _execute_cross_platform(self, gap: dict, bet_size: float, price_buffer: float = 0.0) -> Optional[dict]:
         # polymarket_price and kalshi_price are now the ACTUAL prices of the tokens being bought

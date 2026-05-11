@@ -124,3 +124,23 @@ class KalshiExecutor:
             ) as resp:
                 if resp.status not in (200, 204):
                     raise ExecutorError(f"Kalshi cancel failed HTTP {resp.status}")
+
+    async def get_fill_details(self, order_id: str) -> Optional[float]:
+        """Return the average fill price for a completed Kalshi order, or None on error."""
+        path = f"/trade-api/v2/portfolio/orders/{order_id}"
+        headers = self._sign("GET", path)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{self.api_url}/portfolio/orders/{order_id}",
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                order = data.get("order", {})
+                avg_price = order.get("avg_price") or order.get("yes_price") or order.get("price")
+                try:
+                    return float(avg_price) / 100.0 if avg_price is not None else None
+                except (TypeError, ValueError):
+                    return None
