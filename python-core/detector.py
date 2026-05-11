@@ -83,7 +83,7 @@ class GapDetector:
         else:
             combined = (1.0 - poly_price) + kalshi_price
 
-        taker_fee_rate = gap.get("fee_rate", self.config.get("ev_taker_fee_rate", 0.04))
+        taker_fee_rate = gap.get("fee_rate", self.config.get("ev_taker_fee_rate", 0.02))
         slippage_cents = self.config.get("ev_slippage_cents", 0.5)
         ev_min_cents = self.config.get("ev_min_cents", 1.0)
         ev_result = calculate_arb_ev(

@@ -76,9 +76,10 @@ class TestCombinedPriceCheck:
         assert not is_valid
         assert "EV" in reason or "ev" in reason.lower()
 
-    def test_combined_exactly_at_limit_rejected(self):
-        # poly_no = 0.50, kalshi_yes = 0.45 → combined = 0.95
-        gap = {**BASE_GAP, "polymarket_price": 0.50, "kalshi_price": 0.45}
+    def test_combined_high_ev_insufficient_rejected(self):
+        # combined = (1-0.50) + 0.48 = 0.98 → ev_cents=2¢, fee≈1.96¢, slippage=0.5¢
+        # ev_net ≈ -0.46¢ < ev_min_cents default 1.0¢ → rejected
+        gap = {**BASE_GAP, "polymarket_price": 0.50, "kalshi_price": 0.48}
         detector, _ = make_detector()
         is_valid, _ = feed_gap(detector, gap)
         assert not is_valid
