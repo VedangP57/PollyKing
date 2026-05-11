@@ -250,11 +250,17 @@ def mark_gap_executed(conn: sqlite3.Connection, gap_id: int) -> None:
 
 
 def get_daily_loss(conn: sqlite3.Connection) -> float:
-    row = conn.execute(
+    """Realized losses today plus worst-case exposure of all open live positions."""
+    realized = conn.execute(
         """SELECT COALESCE(SUM(actual_profit), 0) FROM trades
-           WHERE opened_at > date('now') AND status='resolved' AND actual_profit < 0"""
-    ).fetchone()
-    return abs(row[0]) if row else 0.0
+           WHERE opened_at > date('now') AND status='resolved'
+           AND actual_profit < 0 AND dry_run=0"""
+    ).fetchone()[0]
+    open_exposure = conn.execute(
+        """SELECT COALESCE(SUM(amount_usdc), 0) FROM trades
+           WHERE opened_at > date('now') AND status='open' AND dry_run=0"""
+    ).fetchone()[0]
+    return abs(realized) + open_exposure
 
 
 def get_open_position_count(conn: sqlite3.Connection) -> int:
@@ -270,6 +276,18 @@ def get_open_position_count(conn: sqlite3.Connection) -> int:
         "SELECT COUNT(*) FROM trades WHERE status='open'"
     ).fetchone()
     return row[0] if row else 0
+
+
+def has_open_trade(conn: sqlite3.Connection, market_id: str) -> bool:
+    """Return True if any open trade (live or dry) already exists for this market_id."""
+    row = conn.execute(
+        """SELECT 1 FROM trades t
+           JOIN gaps g ON g.id = t.gap_id
+           WHERE g.market_id = ? AND t.status = 'open'
+           LIMIT 1""",
+        (market_id,),
+    ).fetchone()
+    return row is not None
 
 
 def get_open_live_trades(conn: sqlite3.Connection) -> list[dict]:

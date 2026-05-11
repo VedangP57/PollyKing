@@ -170,6 +170,33 @@ class TestDailyStats:
         loss = tracker.get_daily_loss(db)
         assert loss == 0.0
 
+    def test_daily_loss_counts_resolved_losses(self, db):
+        gap_id = tracker.log_gap(db, BASE_GAP)
+        trade_id = tracker.log_trade(db, {**BASE_TRADE, "gap_id": gap_id, "dry_run": False, "amount_usdc": 50.0})
+        tracker.update_trade_result(db, trade_id, actual_profit=-20.0, status="resolved")
+        loss = tracker.get_daily_loss(db)
+        assert loss == pytest.approx(20.0, abs=0.01)
+
+    def test_daily_loss_includes_open_live_exposure(self, db):
+        gap_id = tracker.log_gap(db, BASE_GAP)
+        # Resolved loss
+        trade_id = tracker.log_trade(db, {**BASE_TRADE, "gap_id": gap_id, "dry_run": False, "amount_usdc": 50.0})
+        tracker.update_trade_result(db, trade_id, actual_profit=-15.0, status="resolved")
+        # Open live trade
+        tracker.log_trade(db, {**BASE_TRADE, "gap_id": gap_id, "dry_run": False,
+                                "amount_usdc": 30.0, "status": "open"})
+        loss = tracker.get_daily_loss(db)
+        # 15 realized + 30 open exposure = 45
+        assert loss == pytest.approx(45.0, abs=0.01)
+
+    def test_daily_loss_dry_run_open_not_counted(self, db):
+        gap_id = tracker.log_gap(db, BASE_GAP)
+        # Dry-run open trade must NOT count toward real loss limit
+        tracker.log_trade(db, {**BASE_TRADE, "gap_id": gap_id, "dry_run": True,
+                                "amount_usdc": 100.0, "status": "open"})
+        loss = tracker.get_daily_loss(db)
+        assert loss == pytest.approx(0.0, abs=0.01)
+
     def test_get_open_position_count(self, db):
         gap_id = tracker.log_gap(db, BASE_GAP)
         tracker.log_trade(db, {**BASE_TRADE, "gap_id": gap_id})
@@ -216,3 +243,42 @@ class TestGapCentsAndEmergencyPositions:
         assert row["platform"] == "kalshi"
         assert row["status"] == "open"
         assert abs(row["amount_usdc"] - 10.0) < 0.001
+
+
+class TestHasOpenTrade:
+    def test_no_open_trade_returns_false(self, db):
+        assert tracker.has_open_trade(db, "market-xyz") is False
+
+    def test_open_trade_returns_true(self, db):
+        gap_id = tracker.log_gap(db, {**BASE_GAP, "market_id": "market-abc"})
+        tracker.log_trade(db, {
+            "gap_id": gap_id,
+            "amount_usdc": 10.0,
+            "gap_cents": 7.0,
+            "expected_profit": 0.50,
+            "dry_run": True,
+        })
+        assert tracker.has_open_trade(db, "market-abc") is True
+
+    def test_resolved_trade_returns_false(self, db):
+        gap_id = tracker.log_gap(db, {**BASE_GAP, "market_id": "market-def"})
+        trade_id = tracker.log_trade(db, {
+            "gap_id": gap_id,
+            "amount_usdc": 10.0,
+            "gap_cents": 7.0,
+            "expected_profit": 0.50,
+            "dry_run": False,
+        })
+        tracker.resolve_trade(db, trade_id, actual_profit=0.50)
+        assert tracker.has_open_trade(db, "market-def") is False
+
+    def test_different_market_not_affected(self, db):
+        gap_id = tracker.log_gap(db, {**BASE_GAP, "market_id": "market-ghi"})
+        tracker.log_trade(db, {
+            "gap_id": gap_id,
+            "amount_usdc": 10.0,
+            "gap_cents": 7.0,
+            "expected_profit": 0.50,
+            "dry_run": True,
+        })
+        assert tracker.has_open_trade(db, "market-jkl") is False
