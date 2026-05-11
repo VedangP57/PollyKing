@@ -187,6 +187,23 @@ class TwoLegExecutor:
             poly_amount=amount_a, kalshi_count=None, kalshi_amount=amount_b,
         )
 
+    async def _poll_and_cancel(self, platform: str, order_id: str) -> bool:
+        filled = await self._wait_for_fill(platform, order_id)
+        if not filled:
+            log.warning(
+                "%s order %s did not fill in %ss — canceling",
+                platform, order_id, _FILL_TIMEOUT,
+            )
+            try:
+                if platform == "polymarket":
+                    await self._poly.cancel_order(order_id)
+                elif platform == "kalshi":
+                    await self._kalshi.cancel_order(order_id)
+            except Exception:
+                pass
+            return False
+        return True
+
     async def _gather_legs(
         self,
         gap: dict,
@@ -202,36 +219,30 @@ class TwoLegExecutor:
         a_ok = not isinstance(result_a, Exception)
         b_ok = not isinstance(result_b, Exception)
 
-        # Verify fills for legs that returned a response (accepted ≠ filled)
-        if a_ok and not self._config.get("dry_run", True):
+        # Verify fills concurrently — both polls run in parallel so max wait is
+        # 1×_FILL_TIMEOUT instead of 2×_FILL_TIMEOUT for sequential polling.
+        dry_run = self._config.get("dry_run", True)
+        verify: list[tuple[str, object]] = []  # (label, coroutine)
+
+        if a_ok and not dry_run:
             poly_id = result_a.get("order_id", "")
             if poly_id:
-                filled = await self._wait_for_fill("polymarket", poly_id)
-                if not filled:
-                    log.warning(
-                        "Polymarket order %s did not fill in %ss — canceling",
-                        poly_id, _FILL_TIMEOUT,
-                    )
-                    try:
-                        await self._poly.cancel_order(poly_id)
-                    except Exception:
-                        pass
-                    a_ok = False
+                verify.append(("poly", self._poll_and_cancel("polymarket", poly_id)))
 
-        if b_ok and kalshi_count is not None and not self._config.get("dry_run", True):
+        if b_ok and kalshi_count is not None and not dry_run:
             kalshi_id = result_b.get("order_id", "")
             if kalshi_id:
-                filled = await self._wait_for_fill("kalshi", kalshi_id)
-                if not filled:
-                    log.warning(
-                        "Kalshi order %s did not fill in %ss — canceling",
-                        kalshi_id, _FILL_TIMEOUT,
-                    )
-                    try:
-                        await self._kalshi.cancel_order(kalshi_id)
-                    except Exception:
-                        pass
-                    b_ok = False
+                verify.append(("kalshi", self._poll_and_cancel("kalshi", kalshi_id)))
+
+        if verify:
+            labels, coros = zip(*verify)
+            outcomes = await asyncio.gather(*coros)
+            for label, ok in zip(labels, outcomes):
+                if not ok:
+                    if label == "poly":
+                        a_ok = False
+                    else:
+                        b_ok = False
 
         if a_ok and b_ok:
             fee_rate = gap.get("fee_rate", 0.04)

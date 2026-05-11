@@ -368,6 +368,43 @@ async def test_urgent_gap_uses_aggressive_price(config, db):
 
 
 @pytest.mark.asyncio
+async def test_fill_polls_run_concurrently(config, db, cross_platform_gap):
+    """Both fill polls must run concurrently: total time ≈ 1×timeout, not 2×timeout."""
+    import time
+
+    TIMEOUT = 0.12  # 120ms timeout
+    POLL = 0.02     # 20ms poll interval
+
+    poly_result = {"order_id": "poly_slow", "status": "open", "amount_usdc": 5.0}
+    kalshi_result = {"order_id": "kal_slow", "status": "resting", "ticker": "KXTEST-25DEC", "count": 5}
+
+    with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", TIMEOUT), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", POLL):
+        MockPoly.return_value.place_order = AsyncMock(return_value=poly_result)
+        MockPoly.return_value.get_order_status = AsyncMock(return_value="open")  # never fills
+        MockPoly.return_value.cancel_order = AsyncMock()
+        MockPoly.return_value.close_order = AsyncMock()
+        MockPoly.return_value.get_balance = AsyncMock(return_value=1000.0)
+        MockKalshi.return_value.place_order = AsyncMock(return_value=kalshi_result)
+        MockKalshi.return_value.get_order_status = AsyncMock(return_value="resting")  # never fills
+        MockKalshi.return_value.cancel_order = AsyncMock()
+        MockKalshi.return_value.close_order = AsyncMock()
+
+        ex = TwoLegExecutor(config, db)
+        t0 = time.monotonic()
+        result = await ex.execute(cross_platform_gap, bet_size=10.0)
+        elapsed = time.monotonic() - t0
+
+    assert result is None
+    # Sequential: ~2×TIMEOUT ≈ 0.24s. Concurrent: ~TIMEOUT ≈ 0.12s.
+    assert elapsed < TIMEOUT * 1.8, (
+        f"Fill polls appear sequential: {elapsed:.3f}s > {TIMEOUT * 1.8:.3f}s limit"
+    )
+
+
+@pytest.mark.asyncio
 async def test_poly_partial_fill_routes_close_without_platform_in_result(config, db, cross_platform_gap):
     """close_order must fire even when place_order result lacks 'platform' field (real API behavior)."""
     # Real PolymarketExecutor.place_order() does NOT include 'platform' in its response
