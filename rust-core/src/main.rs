@@ -2,7 +2,7 @@ use arb::{bridge, comparator, fetcher, types};
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use anyhow::Result;
 use log::info;
@@ -23,9 +23,11 @@ async fn main() -> Result<()> {
     let price_map: Arc<RwLock<HashMap<String, types::Price>>> =
         Arc::new(RwLock::new(HashMap::new()));
 
-    // price_notify: fetchers call notify_waiters() after each price write.
-    // comparator wakes up instead of spinning every 10ms.
-    let price_notify: Arc<Notify> = Arc::new(Notify::new());
+    // watch channel: fetchers send an incrementing counter; comparator wakes on any change.
+    // Unlike Notify, watch buffers the latest value — no startup-race when fetchers
+    // write prices before the comparator task starts.
+    let (price_watch_tx, price_watch_rx) = watch::channel::<u64>(0);
+    let price_watch_tx = Arc::new(price_watch_tx);
 
     let (gap_tx, gap_rx) = crossbeam_channel::bounded::<types::Gap>(1000);
 
@@ -49,23 +51,23 @@ async fn main() -> Result<()> {
 
     // Spawn Polymarket REST poller
     let poly_map = Arc::clone(&price_map);
-    let poly_notify = Arc::clone(&price_notify);
+    let poly_watch_tx = Arc::clone(&price_watch_tx);
     let gamma_url = config.polymarket_gamma_url.clone();
     tokio::spawn(async move {
-        if let Err(e) = fetcher::polymarket::run(gamma_url, token_to_gamma_id, poly_map, poly_notify).await {
+        if let Err(e) = fetcher::polymarket::run(gamma_url, token_to_gamma_id, poly_map, poly_watch_tx).await {
             log::error!("Polymarket fetcher error: {e}");
         }
     });
 
     // Spawn Kalshi REST poller
     let kalshi_map = Arc::clone(&price_map);
-    let kalshi_notify = Arc::clone(&price_notify);
+    let kalshi_watch_tx = Arc::clone(&price_watch_tx);
     let kalshi_api_url = config.kalshi_api_url.clone();
     let kalshi_key = config.kalshi_api_key.clone();
     let kalshi_secret = config.kalshi_api_secret.clone();
     tokio::spawn(async move {
         if let Err(e) =
-            fetcher::kalshi::run(kalshi_api_url, kalshi_key, kalshi_secret, kalshi_pairs, kalshi_map, kalshi_notify)
+            fetcher::kalshi::run(kalshi_api_url, kalshi_key, kalshi_secret, kalshi_pairs, kalshi_map, kalshi_watch_tx)
                 .await
         {
             log::error!("Kalshi fetcher error: {e}");
@@ -74,11 +76,10 @@ async fn main() -> Result<()> {
 
     // Spawn comparator
     let comp_map = Arc::clone(&price_map);
-    let comp_notify = Arc::clone(&price_notify);
     let comp_pairs = pairs.clone();
     let comp_config = config.clone();
     tokio::spawn(async move {
-        if let Err(e) = comparator::run(comp_config, comp_pairs, comp_map, comp_notify, gap_tx).await {
+        if let Err(e) = comparator::run(comp_config, comp_pairs, comp_map, price_watch_rx, gap_tx).await {
             log::error!("Comparator error: {e}");
         }
     });

@@ -8,7 +8,7 @@ use hmac::{Hmac, Mac};
 use log::{error, info, warn};
 use serde_json::Value;
 use sha2::Sha256;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use crate::types::{MarketPair, Platform, Price};
 
@@ -37,7 +37,7 @@ pub async fn run(
     _api_secret: String,
     pairs: Vec<MarketPair>,
     price_map: Arc<RwLock<HashMap<String, Price>>>,
-    price_notify: Arc<Notify>,
+    price_watch_tx: Arc<watch::Sender<u64>>,
 ) -> Result<()> {
     if pairs.is_empty() {
         info!("Kalshi fetcher: no cross-platform pairs configured, skipping");
@@ -84,7 +84,9 @@ pub async fn run(
                     match resp.text().await {
                         Ok(text) => {
                             match handle_orderbook(&text, pair, &price_map) {
-                                Ok(()) => price_notify.notify_waiters(),
+                                Ok(()) => {
+                                    let _ = price_watch_tx.send(*price_watch_tx.borrow() + 1);
+                                }
                                 Err(e) => warn!("Kalshi parse error for {ticker}: {e}"),
                             }
                         }

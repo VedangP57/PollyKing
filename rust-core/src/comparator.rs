@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 use log::debug;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 
 use crate::types::{AppConfig, Gap, MarketPair, PairType, Price};
 
@@ -39,14 +39,16 @@ pub async fn run(
     // only when a fetcher has written a new price. With Mutex every read was
     // exclusive even though it was read-only.
     price_map: Arc<RwLock<HashMap<String, Price>>>,
-    price_notify: Arc<Notify>,
+    mut price_watch_rx: watch::Receiver<u64>,
     gap_tx: crossbeam_channel::Sender<Gap>,
 ) -> Result<()> {
     // Pre-compute keys once — no format!() in the hot loop.
     let keys = precompute_keys(&pairs);
 
     loop {
-        price_notify.notified().await;
+        // Block until a fetcher signals a price update.
+        // watch::changed() never drops events — the latest value is always buffered.
+        let _ = price_watch_rx.changed().await;
 
         // Read lock: does NOT clone the entire map.
         // Held only for the duration of the loop below (~microseconds).
