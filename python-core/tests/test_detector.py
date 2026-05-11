@@ -192,6 +192,68 @@ class TestConfidenceCheck:
         assert is_valid
 
 
+class TestDuplicateExecution:
+    def test_rejects_if_open_live_trade_exists_for_market(self):
+        detector, conn = make_detector()
+        # Insert a gap and an open live trade for the same market
+        cur = conn.execute(
+            """INSERT INTO gaps (market_id, polymarket_price, kalshi_price, gap_cents,
+               confidence, detected_at) VALUES (?,?,?,?,?,datetime('now'))""",
+            ("test-market", 0.71, 0.58, 13.0, "high"),
+        )
+        conn.commit()
+        gap_id = cur.lastrowid
+        conn.execute(
+            """INSERT INTO trades (gap_id, amount_usdc, status, dry_run, opened_at)
+               VALUES (?, 50.0, 'open', 0, datetime('now'))""",
+            (gap_id,),
+        )
+        conn.commit()
+
+        is_valid, reason = detector.validate(BASE_GAP)
+        assert not is_valid
+        assert "open trade" in reason.lower()
+
+    def test_allows_execution_after_live_trade_resolves(self):
+        detector, conn = make_detector()
+        cur = conn.execute(
+            """INSERT INTO gaps (market_id, polymarket_price, kalshi_price, gap_cents,
+               confidence, detected_at) VALUES (?,?,?,?,?,datetime('now'))""",
+            ("test-market", 0.71, 0.58, 13.0, "high"),
+        )
+        conn.commit()
+        gap_id = cur.lastrowid
+        conn.execute(
+            """INSERT INTO trades (gap_id, amount_usdc, actual_profit, status, dry_run, opened_at)
+               VALUES (?, 50.0, 5.0, 'resolved', 0, datetime('now'))""",
+            (gap_id,),
+        )
+        conn.commit()
+
+        is_valid, reason = feed_gap(detector, BASE_GAP)
+        assert is_valid, f"Expected valid after resolved trade, got: {reason}"
+
+    def test_different_market_not_blocked(self):
+        detector, conn = make_detector()
+        cur = conn.execute(
+            """INSERT INTO gaps (market_id, polymarket_price, kalshi_price, gap_cents,
+               confidence, detected_at) VALUES (?,?,?,?,?,datetime('now'))""",
+            ("other-market", 0.71, 0.58, 13.0, "high"),
+        )
+        conn.commit()
+        gap_id = cur.lastrowid
+        conn.execute(
+            """INSERT INTO trades (gap_id, amount_usdc, status, dry_run, opened_at)
+               VALUES (?, 50.0, 'open', 0, datetime('now'))""",
+            (gap_id,),
+        )
+        conn.commit()
+
+        # BASE_GAP is for "test-market", open trade is on "other-market" — should not block
+        is_valid, reason = feed_gap(detector, BASE_GAP)
+        assert is_valid, f"Different market should not be blocked, got: {reason}"
+
+
 class TestDailyLossLimit:
     def test_loss_limit_blocks_execution(self):
         detector, conn = make_detector({"max_daily_loss_usdc": 0.01})

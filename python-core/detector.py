@@ -7,7 +7,7 @@ import json
 import sqlite3
 from ev_engine import calculate_arb_ev
 from risk_engine import RiskEngine
-from tracker import get_daily_loss, get_open_position_count
+from tracker import get_daily_loss, get_open_position_count, has_open_trade
 
 
 class GapDetector:
@@ -34,6 +34,11 @@ class GapDetector:
         poly_price = gap["polymarket_price"]
         kalshi_price = gap["kalshi_price"]
         gap_cents = gap["gap_cents"]
+
+        # Check -1: Per-market dedup — reject immediately if we already hold an open
+        # position on this market. Prevents double-sizing on persistent gaps.
+        if has_open_trade(self.db_conn, market_id):
+            return False, f"Already have open trade for {market_id} — skipping"
 
         # Kill switch gate
         if self.risk_engine:
