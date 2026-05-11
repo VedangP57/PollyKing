@@ -210,7 +210,7 @@ async fn run_ws_session(
         .header("Kalshi-Access-Key", api_key)
         .header("Kalshi-Access-Signature", &signature)
         .header("Kalshi-Access-Timestamp", &timestamp)
-        .header("Host", "api.elections.kalshi.com")
+        // Host is set automatically by tungstenite from the URI — do not hardcode.
         .body(())
         .map_err(|e| anyhow::anyhow!("WS request build: {e}"))?;
 
@@ -256,6 +256,9 @@ async fn run_ws_session(
                     Some(Err(e)) => {
                         return Err(anyhow::anyhow!("WS read error: {e}"));
                     }
+                    Some(Ok(Message::Binary(_))) => {
+                        warn!("Kalshi WS: unexpected binary frame — ignoring");
+                    }
                     _ => {}
                 }
             }
@@ -297,6 +300,10 @@ pub async fn run(
 
     info!("Kalshi WS fetcher starting — {} tickers", tickers.len());
 
+    // Exponential backoff on consecutive errors: 10s → 20s → 40s → 80s → 160s (cap 300s).
+    // A clean close resets the error counter and reconnects after 5s.
+    let mut consecutive_errors: u32 = 0;
+
     loop {
         match run_ws_session(
             &api_url,
@@ -310,15 +317,25 @@ pub async fn run(
         .await
         {
             Ok(()) => {
+                consecutive_errors = 0;
                 info!("Kalshi WS session ended — reconnecting in 5s");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
             }
             Err(e) => {
-                warn!("Kalshi WS error: {e} — reconnecting in 10s");
-                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                continue;
+                consecutive_errors += 1;
+                let backoff_secs = std::cmp::min(10 * (1u64 << (consecutive_errors - 1).min(5)), 300);
+                if consecutive_errors >= 5 {
+                    log::error!(
+                        "Kalshi WS: {consecutive_errors} consecutive failures — \
+                         check KALSHI_API_KEY/KALSHI_API_SECRET. Retrying in {backoff_secs}s. \
+                         Last error: {e}"
+                    );
+                } else {
+                    warn!("Kalshi WS error (attempt {consecutive_errors}): {e} — retrying in {backoff_secs}s");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
             }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
 
