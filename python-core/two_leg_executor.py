@@ -42,7 +42,8 @@ class TwoLegExecutor:
                     status = await self._kalshi.get_order_status(order_id)
                 else:
                     return False
-                if status == "matched":
+                # Polymarket uses "matched"; Kalshi uses "executed"
+                if status in ("matched", "executed"):
                     return True
                 if status in ("canceled", "cancelled"):
                     return False
@@ -183,7 +184,7 @@ class TwoLegExecutor:
         )
         return await self._gather_legs(
             gap, task_a, task_b, bet_size=bet_size,
-            poly_amount=amount_a, kalshi_count=None,
+            poly_amount=amount_a, kalshi_count=None, kalshi_amount=amount_b,
         )
 
     async def _gather_legs(
@@ -194,6 +195,7 @@ class TwoLegExecutor:
         bet_size: float,
         poly_amount: float,
         kalshi_count: Optional[int],
+        kalshi_amount: float = 0.0,
     ) -> Optional[dict]:
         result_a, result_b = await asyncio.gather(task_a, task_b, return_exceptions=True)
 
@@ -253,53 +255,96 @@ class TwoLegExecutor:
             )
             return None
 
-        # Partial fill — emergency close the filled leg
-        filled_result = result_a if a_ok else result_b
-        failed_error = result_b if a_ok else result_a
-        log.error(
-            "PARTIAL FILL on %s — filled: %s | failed: %s — emergency closing",
-            gap["market_id"], filled_result.get("order_id"), failed_error,
-        )
-        await self._emergency_close(filled_result, gap)
+        # Partial fill — emergency close the filled leg using explicit routing,
+        # not filled.get("platform") which is absent from real exchange responses.
+        pair_type = gap.get("pair_type", "cross_platform")
+        if a_ok:
+            filled_order_id = result_a.get("order_id", "")
+            log.error(
+                "PARTIAL FILL on %s — poly filled %s, leg_b failed: %s — emergency closing poly",
+                gap["market_id"], filled_order_id, result_b,
+            )
+            await self._emergency_close(
+                platform="polymarket",
+                order_id=filled_order_id,
+                token_or_ticker=gap.get("polymarket_token", ""),
+                amount_usdc=poly_amount,
+                count=None,
+                price=gap["polymarket_price"],
+                pair_type=pair_type,
+                market_id=gap["market_id"],
+            )
+        else:
+            filled_order_id = result_b.get("order_id", "")
+            log.error(
+                "PARTIAL FILL on %s — leg_b filled %s, poly failed: %s — emergency closing leg_b",
+                gap["market_id"], filled_order_id, result_a,
+            )
+            if pair_type == "cross_platform":
+                b_platform = "kalshi"
+                b_ticker = gap.get("kalshi_ticker", "")
+                b_amount = kalshi_amount if kalshi_amount > 0 else round(
+                    (kalshi_count or 1) * gap["kalshi_price"], 4
+                )
+            else:  # internal — both legs are Polymarket; kalshi_ticker holds token_b
+                b_platform = "polymarket"
+                b_ticker = gap.get("kalshi_ticker", "")
+                b_amount = kalshi_amount
+            await self._emergency_close(
+                platform=b_platform,
+                order_id=filled_order_id,
+                token_or_ticker=b_ticker,
+                amount_usdc=b_amount,
+                count=kalshi_count,
+                price=gap["kalshi_price"],
+                pair_type=pair_type,
+                market_id=gap["market_id"],
+            )
         return None
 
-    async def _emergency_close(self, filled: dict, gap: dict) -> None:
-        platform = filled.get("platform", "")
-        pair_type = gap.get("pair_type", "cross_platform")
+    async def _emergency_close(
+        self,
+        platform: str,
+        order_id: str,
+        token_or_ticker: str,
+        amount_usdc: float,
+        count: Optional[int],
+        price: float,
+        pair_type: str,
+        market_id: str,
+    ) -> None:
         try:
             if platform == "polymarket":
-                # Sell back at the price we bought — executor adds slippage buffer
-                buy_price = filled.get("price", gap.get("polymarket_price", 0.5))
                 await self._poly.close_order(
-                    token_id=filled["token_id"],
-                    amount_usdc=filled["amount_usdc"],
-                    price=buy_price,
+                    token_id=token_or_ticker,
+                    amount_usdc=amount_usdc,
+                    price=price,
                     neg_risk=(pair_type == "internal"),
                 )
             elif platform == "kalshi":
                 await self._kalshi.close_order(
-                    ticker=filled["ticker"],
-                    count=filled["count"],
+                    ticker=token_or_ticker,
+                    count=count,
                 )
             status = "closed_auto"
         except Exception as e:
             log.error(
-                "Emergency close FAILED for %s: %s — REQUIRES MANUAL ACTION",
-                filled.get("order_id"), e,
+                "Emergency close FAILED for %s on %s: %s — REQUIRES MANUAL ACTION",
+                order_id, platform, e,
             )
             status = "open"
 
         log_emergency_position(self._db, {
-            "market_id": gap.get("market_id", ""),
+            "market_id": market_id,
             "platform": platform,
-            "order_id": filled.get("order_id", ""),
-            "side": filled.get("ticker") or filled.get("token_id", ""),
-            "amount_usdc": filled.get("amount_usdc", 0.0),
+            "order_id": order_id,
+            "side": token_or_ticker,
+            "amount_usdc": amount_usdc,
         })
         if status == "closed_auto":
             self._db.execute(
                 "UPDATE emergency_positions SET status='closed_auto', closed_at=datetime('now') "
                 "WHERE order_id=?",
-                (filled.get("order_id", ""),),
+                (order_id,),
             )
             self._db.commit()

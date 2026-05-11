@@ -368,6 +368,58 @@ async def test_urgent_gap_uses_aggressive_price(config, db):
 
 
 @pytest.mark.asyncio
+async def test_poly_partial_fill_routes_close_without_platform_in_result(config, db, cross_platform_gap):
+    """close_order must fire even when place_order result lacks 'platform' field (real API behavior)."""
+    # Real PolymarketExecutor.place_order() does NOT include 'platform' in its response
+    poly_result_no_platform = {"order_id": "poly_real", "status": "matched",
+                               "token_id": "no_token_hex", "amount_usdc": 5.0}
+
+    with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.05), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.02):
+        MockPoly.return_value.place_order = AsyncMock(return_value=poly_result_no_platform)
+        MockPoly.return_value.get_order_status = AsyncMock(return_value="matched")
+        MockPoly.return_value.close_order = AsyncMock()
+        MockKalshi.return_value.place_order = AsyncMock(side_effect=ExecutorError("kalshi fail"))
+
+        ex = TwoLegExecutor(config, db)
+        result = await ex.execute(cross_platform_gap, bet_size=10.0)
+
+    assert result is None
+    # Emergency close MUST fire on the poly leg even without 'platform' key in result dict
+    MockPoly.return_value.close_order.assert_called_once()
+    row = db.execute("SELECT * FROM emergency_positions WHERE order_id='poly_real'").fetchone()
+    assert row is not None
+
+
+@pytest.mark.asyncio
+async def test_kalshi_partial_fill_routes_close_without_platform_in_result(config, db, cross_platform_gap):
+    """Kalshi close_order must fire even when place_order result lacks 'platform' field."""
+    # Real KalshiExecutor.place_order() does NOT include 'platform' in its response
+    kalshi_result_no_platform = {"order_id": "kal_real", "status": "resting",
+                                 "ticker": "KXTEST-25DEC", "count": 11}
+
+    with patch("two_leg_executor.PolymarketExecutor") as MockPoly, \
+         patch("two_leg_executor.KalshiExecutor") as MockKalshi, \
+         patch("two_leg_executor._FILL_TIMEOUT", 0.05), \
+         patch("two_leg_executor._FILL_POLL_INTERVAL", 0.02):
+        MockPoly.return_value.place_order = AsyncMock(side_effect=ExecutorError("poly fail"))
+        MockKalshi.return_value.place_order = AsyncMock(return_value=kalshi_result_no_platform)
+        MockKalshi.return_value.get_order_status = AsyncMock(return_value="matched")
+        MockKalshi.return_value.close_order = AsyncMock()
+
+        ex = TwoLegExecutor(config, db)
+        result = await ex.execute(cross_platform_gap, bet_size=10.0)
+
+    assert result is None
+    # Emergency close MUST fire on the kalshi leg even without 'platform' key in result dict
+    MockKalshi.return_value.close_order.assert_called_once()
+    row = db.execute("SELECT * FROM emergency_positions WHERE order_id='kal_real'").fetchone()
+    assert row is not None
+
+
+@pytest.mark.asyncio
 async def test_internal_pair_uses_polymarket_for_both_legs(config, db, internal_gap):
     poly_result_a = {"order_id": "poly_a", "status": "matched", "platform": "polymarket",
                      "token_id": "tokenA_hex", "amount_usdc": 5.0}
