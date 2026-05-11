@@ -31,17 +31,19 @@ def calculate_arb_ev(
     taker_fee_rate: float = 0.02,
     slippage_cents: float = 0.5,
     p_model: Optional[float] = None,
+    kalshi_fee_cents: float = 0.0,
 ) -> dict:
     """EV for a two-leg arbitrage position.
 
     combined: sum of both leg prices (< 1.0 → profit opportunity)
-    taker_fee_rate: applied to total combined stake
+    taker_fee_rate: applied to total combined stake (Polymarket taker fee)
     slippage_cents: expected slippage cost in cents
+    kalshi_fee_cents: Kalshi per-trade fee in cents (contracts × fee_per_contract / bet_usdc × 100)
     p_model: optional Bayesian posterior; scales ev_net by confidence (reserved for Phase 4)
     """
     gap_cents = (1.0 - combined) * 100.0
     fee_cents = taker_fee_rate * combined * 100.0
-    ev_net_cents = gap_cents - fee_cents - slippage_cents
+    ev_net_cents = gap_cents - fee_cents - slippage_cents - kalshi_fee_cents
 
     if p_model is not None:
         confidence_factor = abs(p_model - 0.5) * 2.0  # 0=uncertain, 1=certain
