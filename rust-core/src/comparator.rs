@@ -211,6 +211,8 @@ mod tests {
             yes_price: yes_bid,
             yes_ask,
             no_price: 1.0 - yes_bid,
+            bid_size: 100.0,
+            ask_size: 100.0,
             timestamp: Utc::now(),
         }
     }

@@ -8,6 +8,8 @@ pub struct Price {
     pub yes_price: f64,   // best bid for YES (receive when selling YES)
     pub yes_ask: f64,     // best ask for YES (pay when buying YES)
     pub no_price: f64,    // 1.0 - yes_price (derived)
+    pub bid_size: f64,    // top-of-book bid qty (contracts on Kalshi, shares on Polymarket)
+    pub ask_size: f64,    // top-of-book ask qty
     pub timestamp: DateTime<Utc>,
 }
 

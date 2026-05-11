@@ -80,6 +80,16 @@ impl KalshiBook {
     pub fn yes_ask_cents(&self) -> Option<i64> {
         self.best_no_bid_cents().map(|no_bid| 100 - no_bid)
     }
+
+    /// Qty available at the best YES bid.
+    pub fn best_yes_bid_qty(&self) -> i64 {
+        self.yes.iter().rev().find(|(_, &qty)| qty > 0).map(|(_, &q)| q).unwrap_or(0)
+    }
+
+    /// Qty available at the best YES ask (matched against the NO bid book).
+    pub fn best_yes_ask_qty(&self) -> i64 {
+        self.no.iter().rev().find(|(_, &qty)| qty > 0).map(|(_, &q)| q).unwrap_or(0)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +133,8 @@ fn apply_snapshot(
         yes_price: yes_bid,
         yes_ask,
         no_price: 1.0 - yes_bid,
+        bid_size: book.best_yes_bid_qty() as f64,
+        ask_size: book.best_yes_ask_qty() as f64,
         timestamp: Utc::now(),
     };
     price_map.write().unwrap().insert(format!("kalshi:{ticker}"), price);
@@ -163,6 +175,9 @@ fn apply_delta(
         .map(|c| c as f64 / 100.0)
         .unwrap_or(yes_bid);
 
+    let bid_size = book.best_yes_bid_qty() as f64;
+    let ask_size = book.best_yes_ask_qty() as f64;
+
     // Release books write lock before acquiring price_map write lock.
     drop(books_map);
 
@@ -171,6 +186,8 @@ fn apply_delta(
         existing.yes_price = yes_bid;
         existing.yes_ask = yes_ask;
         existing.no_price = 1.0 - yes_bid;
+        existing.bid_size = bid_size;
+        existing.ask_size = ask_size;
         existing.timestamp = Utc::now();
     }
 }
@@ -448,6 +465,8 @@ pub fn handle_orderbook(
         yes_price,
         yes_ask: yes_price,   // legacy REST helper — best bid only
         no_price: 1.0 - yes_price,
+        bid_size: 0.0,
+        ask_size: 0.0,
         timestamp: Utc::now(),
     };
 
@@ -566,6 +585,19 @@ mod tests {
             "yes_ask=(100-33)/100=0.67, got {}",
             price.yes_ask
         );
+    }
+
+    #[test]
+    fn test_kalshi_snapshot_populates_bid_size() {
+        let price_map: Arc<RwLock<HashMap<String, Price>>> = Arc::new(RwLock::new(HashMap::new()));
+        let books = make_books();
+        let yes = [[60i64, 50i64], [58i64, 30i64]];
+        let no  = [[38i64, 20i64]];
+        apply_snapshot("TICKER", &yes, &no, "mkt-id", &price_map, &books);
+        let map = price_map.read().unwrap();
+        let p = map.get("kalshi:TICKER").unwrap();
+        assert!((p.bid_size - 50.0).abs() < 0.001, "bid_size should be 50 (qty at best YES bid), got {}", p.bid_size);
+        assert!((p.ask_size - 20.0).abs() < 0.001, "ask_size should be 20 (qty at best NO bid → YES ask), got {}", p.ask_size);
     }
 
     #[test]

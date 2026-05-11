@@ -88,6 +88,17 @@ pub fn handle_price_message(
             .filter(|&p| p > 0.0)
             .unwrap_or(bid_price);   // fall back to bid when ask absent
 
+        let bid_size: f64 = msg
+            .get("bid_size")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        let ask_size: f64 = msg
+            .get("ask_size")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+
         price_map.write().unwrap().insert(
             format!("poly:{asset_id}"),
             Price {
@@ -96,6 +107,8 @@ pub fn handle_price_message(
                 yes_price: bid_price,
                 yes_ask: ask_price,
                 no_price: 1.0 - bid_price,
+                bid_size,
+                ask_size,
                 timestamp: Utc::now(),
             },
         );
@@ -154,6 +167,8 @@ async fn fetch_batch(
                 yes_price,
                 yes_ask: yes_price,   // REST warm-up — no ask data, fall back to bid
                 no_price: 1.0 - yes_price,
+                bid_size: 0.0,
+                ask_size: 0.0,
                 timestamp: Utc::now(),
             },
         );
@@ -519,6 +534,18 @@ mod tests {
         let map = pm.read().unwrap();
         let price = map.get("poly:noask").unwrap();
         assert!((price.yes_ask - 0.55).abs() < 0.001, "yes_ask should fall back to bid, got {}", price.yes_ask);
+    }
+
+    #[test]
+    fn test_bid_size_stored_in_price() {
+        let pm = make_price_map();
+        let tx = make_watch();
+        let msg = r#"{"event_type":"best_bid_ask","asset_id":"sz1","bid_price":"0.60","bid_size":"250","ask_price":"0.61","ask_size":"100"}"#;
+        handle_price_message(msg, &pm, &tx);
+        let map = pm.read().unwrap();
+        let p = map.get("poly:sz1").unwrap();
+        assert!((p.bid_size - 250.0).abs() < 0.001, "bid_size should be 250, got {}", p.bid_size);
+        assert!((p.ask_size - 100.0).abs() < 0.001, "ask_size should be 100, got {}", p.ask_size);
     }
 
     #[test]
