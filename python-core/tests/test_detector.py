@@ -68,6 +68,70 @@ class TestValidGap:
         assert reason == "valid"
 
 
+class TestKalshiFeeModel:
+    def test_kalshi_fee_kills_thin_gap(self):
+        # combined = (1-0.55) + 0.50 = 0.95 → gap=5¢
+        # poly_fee = 0.02*0.95*100 = 1.9¢, slippage=0.5¢ → ev_net without Kalshi fee = 2.6¢ (positive)
+        # With Kalshi fee: contracts=round(10/0.50)=20, fee=0.07*20=1.40 → fee_cents=14.0¢
+        # ev_net = 2.6 - 14.0 = -11.4¢ → SKIP
+        gap = {
+            **BASE_GAP,
+            "polymarket_price": 0.55,
+            "kalshi_price": 0.50,
+            "gap_cents": 5.0,
+        }
+        # Verify the gap passes WITHOUT Kalshi fee — confirms the fee is the cause of rejection
+        detector_no_fee, _ = make_detector({
+            "min_bet_usdc": 10.0,
+            "kalshi_fee_per_contract": 0.0,
+            "ev_min_cents": 1.0,
+            "cross_platform_min_gap_cents": 5.0,
+        })
+        is_valid_no_fee, _ = feed_gap(detector_no_fee, gap)
+        assert is_valid_no_fee, "Gap should pass without Kalshi fee (confirms fee is the variable)"
+
+        # Now verify the same gap FAILS with a high Kalshi fee
+        detector_fee, _ = make_detector({
+            "min_bet_usdc": 10.0,
+            "kalshi_fee_per_contract": 0.07,
+            "ev_min_cents": 1.0,
+            "cross_platform_min_gap_cents": 5.0,
+        })
+        is_valid, reason = feed_gap(detector_fee, gap)
+        assert not is_valid
+        assert "EV" in reason or "ev" in reason.lower()
+
+    def test_internal_pair_no_kalshi_fee(self):
+        # Internal pairs (both Poly) must NOT have Kalshi fee applied.
+        # With kalshi_fee_per_contract=0.07 and 20 contracts, fee would be 14¢ — enough to kill any gap.
+        # The fact that the gap passes shows the fee is not applied to internal pairs.
+        gap = {
+            **BASE_GAP,
+            "pair_type": "internal",
+            "polymarket_price": 0.45,
+            "kalshi_price": 0.45,
+            "gap_cents": 10.0,
+            "polymarket_token": "token-abc",
+            "kalshi_ticker": "token-xyz",
+        }
+        detector, conn = make_detector({
+            "min_bet_usdc": 10.0,
+            "kalshi_fee_per_contract": 0.07,
+            "ev_min_cents": 1.0,
+            "internal_min_gap_cents": 8.0,
+        })
+        # Internal pairs require outcome_count=2 in market_pairs table
+        conn.execute(
+            """INSERT INTO market_pairs (token_a, token_b, outcome_count, pair_type, created_at, last_seen)
+               VALUES (?, ?, 2, 'internal', datetime('now'), datetime('now'))""",
+            ("token-abc", "token-xyz"),
+        )
+        conn.commit()
+        is_valid, reason = feed_gap(detector, gap)
+        # Without Kalshi fee: ev_net = 10 - 1.8 - 0.5 = 7.7¢ → should pass
+        assert is_valid, f"Internal pair should not apply Kalshi fee, got: {reason}"
+
+
 class TestCombinedPriceCheck:
     def test_combined_too_high_rejected(self):
         gap = {**BASE_GAP, "polymarket_price": 0.50, "kalshi_price": 0.50}
@@ -196,6 +260,7 @@ def test_ev_gate_uses_fee_and_slippage(tmp_path):
         "ev_min_cents": 2.0,
         "ev_taker_fee_rate": 0.02,
         "ev_slippage_cents": 0.5,
+        "kalshi_fee_per_contract": 0.0,  # isolates poly fee + slippage from Kalshi fee effect
     }
     detector = GapDetector(config, db)
 

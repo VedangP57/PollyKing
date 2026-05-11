@@ -86,11 +86,23 @@ class GapDetector:
         taker_fee_rate = gap.get("fee_rate", self.config.get("ev_taker_fee_rate", 0.02))
         slippage_cents = self.config.get("ev_slippage_cents", 0.5)
         ev_min_cents = self.config.get("ev_min_cents", 1.0)
+
+        # Kalshi charges per-contract fees on top of the taker rate.
+        # Only applies to cross_platform pairs (internal pairs are both Polymarket, no Kalshi).
+        kalshi_fee_cents = 0.0
+        if pair_type == "cross_platform":
+            bet_usdc = self.config.get("min_bet_usdc", 10.0)
+            k_price = gap.get("kalshi_price", 0.5)
+            fee_per_contract = self.config.get("kalshi_fee_per_contract", 0.035)
+            contracts = max(1, round(bet_usdc / k_price)) if k_price > 0 else 1
+            kalshi_fee_cents = (fee_per_contract * contracts / bet_usdc) * 100.0
+
         ev_result = calculate_arb_ev(
             combined=combined,
             taker_fee_rate=taker_fee_rate,
             slippage_cents=slippage_cents,
             p_model=gap.get("p_model"),
+            kalshi_fee_cents=kalshi_fee_cents,
         )
         if ev_result["ev_net_cents"] < ev_min_cents:
             return False, (
