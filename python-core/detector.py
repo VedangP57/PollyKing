@@ -75,15 +75,28 @@ class GapDetector:
             if outcome_count != 2:
                 return False, f"REJECTED: multi-outcome market ({outcome_count} outcomes, need exactly 2)"
 
-        # Check 1: Combined cost leaves room for fees (< $0.95 combined)
+        # Check 1: Net EV after fees and slippage must exceed ev_min_cents.
         # Cross-platform: buy Poly NO + Kalshi YES → combined = (1-poly) + kalshi
         # Internal negRisk: buy both YES tokens     → combined = poly + kalshi
         if pair_type == "internal":
             combined = poly_price + kalshi_price
         else:
             combined = (1.0 - poly_price) + kalshi_price
-        if combined >= 0.95:
-            return False, f"Combined price {combined:.3f} >= 0.95 (no profit after fees)"
+
+        taker_fee_rate = gap.get("fee_rate", self.config.get("ev_taker_fee_rate", 0.04))
+        slippage_cents = self.config.get("ev_slippage_cents", 0.5)
+        ev_min_cents = self.config.get("ev_min_cents", 1.0)
+        ev_result = calculate_arb_ev(
+            combined=combined,
+            taker_fee_rate=taker_fee_rate,
+            slippage_cents=slippage_cents,
+            p_model=gap.get("p_model"),
+        )
+        if ev_result["ev_net_cents"] < ev_min_cents:
+            return False, (
+                f"EV net {ev_result['ev_net_cents']:.2f}¢ < min {ev_min_cents:.1f}¢ "
+                f"(gap {ev_result['ev_cents']:.2f}¢ gross)"
+            )
 
         # Check 1b: Per-pair-type minimum gap threshold
         # Internal pairs have a higher bar (negRisk mechanics more complex)
@@ -93,17 +106,6 @@ class GapDetector:
             min_gap_for_type = self.config.get("cross_platform_min_gap_cents", 5.0)
         if gap_cents < min_gap_for_type:
             return False, f"Gap {gap_cents:.1f}¢ below {pair_type} minimum {min_gap_for_type:.1f}¢"
-
-        # Check 1c: EV net must exceed minimum threshold after fees + slippage
-        # Use per-pair fee_rate from markets.json; fall back to 4% (conservative)
-        taker_fee_rate = gap.get("fee_rate", self.config.get("ev_taker_fee_rate", 0.04))
-        slippage_cents = self.config.get("ev_slippage_cents", 0.5)
-        ev_min_cents = self.config.get("ev_min_cents", 1.0)
-        arb_ev = calculate_arb_ev(combined, taker_fee_rate, slippage_cents)
-        if arb_ev["ev_net_cents"] < ev_min_cents:
-            return False, (
-                f"EV_net {arb_ev['ev_net_cents']:.2f}¢ < min {ev_min_cents:.1f}¢"
-            )
 
         # Check 2: Gap must be stable for 3+ consecutive updates
         history = self._history[market_id]

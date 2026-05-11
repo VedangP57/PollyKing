@@ -74,7 +74,7 @@ class TestCombinedPriceCheck:
         detector, _ = make_detector()
         is_valid, reason = feed_gap(detector, gap)
         assert not is_valid
-        assert "0.95" in reason or "fee" in reason.lower()
+        assert "EV" in reason or "ev" in reason.lower()
 
     def test_combined_exactly_at_limit_rejected(self):
         # poly_no = 0.50, kalshi_yes = 0.45 → combined = 0.95
@@ -175,6 +175,55 @@ def test_cross_platform_gap_uses_per_pair_fee_rate():
     }
     ok, reason = feed_gap(detector, gap, times=3)
     assert ok, f"Expected valid: {reason}"
+
+
+def test_ev_gate_uses_fee_and_slippage(tmp_path):
+    """Detector must reject gaps that fail the net EV check after fee + slippage."""
+    import sqlite3
+    from detector import GapDetector
+
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    from tracker import _create_tables
+    _create_tables(db)
+
+    config = {
+        "min_gap_cents": 1.0,
+        "max_gap_cents": 30.0,
+        "max_daily_loss_usdc": 1000.0,
+        "max_open_positions": 999,
+        "ev_min_cents": 2.0,
+        "ev_taker_fee_rate": 0.02,
+        "ev_slippage_cents": 0.5,
+    }
+    detector = GapDetector(config, db)
+
+    # combined = 0.94 → 6¢ gross gap → ev_net = 6 - 1.88 - 0.5 = 3.62¢ → passes 2¢ threshold
+    # cross_platform: combined = (1 - poly_price) + kalshi_price
+    # (1 - 0.65) + 0.59 = 0.35 + 0.59 = 0.94
+    gap_ok = {
+        "market_id": "test-market", "pair_type": "cross_platform",
+        "polymarket_price": 0.65, "kalshi_price": 0.59,
+        "gap_cents": 6.0, "confidence": "high",
+    }
+    # Feed 3 consecutive updates to pass the stability check
+    for _ in range(3):
+        ok, reason = detector.validate(gap_ok)
+    assert ok, f"6¢ gap should pass 2¢ EV threshold, got: {reason}"
+
+    # Set high ev_min_cents so the same gap is rejected
+    config2 = dict(config)
+    config2["ev_min_cents"] = 10.0  # 10¢ minimum — gap only produces ~3.62¢ net
+    detector2 = GapDetector(config2, db)
+    gap_marginal = {
+        "market_id": "test-market-2", "pair_type": "cross_platform",
+        "polymarket_price": 0.65, "kalshi_price": 0.59,
+        "gap_cents": 6.0, "confidence": "high",
+    }
+    for _ in range(3):
+        ok2, reason2 = detector2.validate(gap_marginal)
+    assert not ok2, f"Should reject gap below 10¢ EV threshold"
+    assert "EV" in reason2 or "ev" in reason2.lower(), f"Expected EV rejection reason, got: {reason2}"
 
 
 def test_internal_gap_requires_higher_minimum():
