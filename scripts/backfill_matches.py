@@ -20,12 +20,13 @@ from pathlib import Path
 import aiohttp
 from dotenv import load_dotenv
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "python-core"))
+_PROJECT_ROOT = Path(__file__).parent.parent  # always the repo root, regardless of CWD
+sys.path.insert(0, str(_PROJECT_ROOT / "python-core"))
 
 import tracker
 from matcher import Matcher
 
-load_dotenv()
+load_dotenv(_PROJECT_ROOT / ".env")
 
 # Gamma API — fully public, no auth, used for market discovery
 POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
@@ -33,8 +34,15 @@ POLYMARKET_GAMMA_API = "https://gamma-api.polymarket.com"
 # (key only needed for live order placement when DRY_RUN=false)
 KALSHI_API = os.getenv("KALSHI_API_URL", "https://api.elections.kalshi.com/trade-api/v2")
 KALSHI_API_KEY = os.getenv("KALSHI_API_KEY", "")  # optional — only for live trading
-MARKETS_JSON = os.getenv("MARKETS_JSON", "config/markets.json")
-DB_PATH = os.getenv("DB_PATH", "data/trades.db")
+
+def _resolve(env_key: str, default: str) -> str:
+    """Return absolute path — resolve relative env values against project root."""
+    raw = os.getenv(env_key, default)
+    p = Path(raw)
+    return str(p if p.is_absolute() else _PROJECT_ROOT / p)
+
+MARKETS_JSON = _resolve("MARKETS_JSON", "config/markets.json")
+DB_PATH = _resolve("DB_PATH", "data/trades.db")
 
 # Only track markets with at least this much USDC liquidity on each side.
 # Filters out illiquid markets where arb would be impossible to fill.
@@ -42,15 +50,26 @@ MIN_LIQUIDITY_USDC = float(os.getenv("MIN_LIQUIDITY_USDC", "500"))
 
 
 async def fetch_polymarket_markets(session: aiohttp.ClientSession) -> list[dict]:
-    """Uses Gamma API — fully public, no API key required."""
+    """Uses Gamma API — fully public, no API key required.
+
+    Fetches liquid markets first by sorting by volume descending.
+    Caps at MAX_POLYMARKET_MARKETS to avoid 5-minute pagination runs.
+    """
+    MAX_POLYMARKET_MARKETS = 5000
     markets = []
     offset = 0
-    limit = 500  # Gamma supports up to 500 per page — reduces round trips ~5x
+    limit = 500
 
-    print(f"  Fetching Polymarket markets (500/page)...", flush=True)
+    print(f"  Fetching Polymarket markets (500/page, max {MAX_POLYMARKET_MARKETS})...", flush=True)
     page = 0
-    while True:
-        params = {"active": "true", "limit": limit, "offset": offset}
+    while len(markets) < MAX_POLYMARKET_MARKETS:
+        params = {
+            "active": "true",
+            "limit": limit,
+            "offset": offset,
+            "order": "volume24hr",
+            "ascending": "false",
+        }
         try:
             async with session.get(f"{POLYMARKET_GAMMA_API}/markets", params=params) as resp:
                 if resp.status != 200:
@@ -61,7 +80,6 @@ async def fetch_polymarket_markets(session: aiohttp.ClientSession) -> list[dict]
             print(f"\n  Polymarket request failed: {e}")
             break
 
-        # Gamma API returns a list directly (not wrapped in {"data": [...]})
         batch = data if isinstance(data, list) else data.get("data", [])
         if not batch:
             break
@@ -220,6 +238,12 @@ async def main():
             entry["polymarket_slug"] = pair.polymarket_slug
             entry["kalshi_ticker"] = pair.kalshi_ticker
         pairs_entries.append(entry)
+
+    # Bail out without touching markets.json if both fetches failed — API outage
+    # should not wipe out a previously-good pair list.
+    if not poly_markets and not kalshi_markets:
+        print("ERROR: Both Polymarket and Kalshi returned 0 markets — API outage? Keeping existing markets.json.")
+        return
 
     # Load existing file to preserve manual_pairs
     markets_path = Path(MARKETS_JSON)

@@ -1,7 +1,31 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python-core/.venv/bin/pip install *)"
+      "Bash(python-core/.venv/bin/pip install *)",
+      "Bash(uv run *)",
+      "Bash(uv sync *)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(python3 -m py_compile kelly_engine.py)",
+      "Bash(git commit *)",
+      "Bash(cargo check *)",
+      "Bash(npm run *)",
+      "Bash(python3 -m pip list)",
+      "Bash(python3 -c ' *)",
+      "Bash(cargo test *)",
+      "Bash(git -C /Users/sarvadhisolution/Documents/Personal/PolyyKing add rust-core/src/fetcher/polymarket.rs)",
+      "Bash(git -C /Users/sarvadhisolution/Documents/Personal/PolyyKing commit -m ' *)",
+      "Bash(cargo build *)",
+      "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \".tables\")",
+      "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"PRAGMA journal_mode\")",
+      "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT COUNT\\(*\\) FROM trades\")",
+      "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT COUNT\\(*\\) FROM gaps\")",
+      "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT COUNT\\(*\\) FROM emergency_positions\")",
+      "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT COUNT\\(*\\), AVG\\(gap_cents\\), MIN\\(gap_cents\\), MAX\\(gap_cents\\) FROM gaps WHERE detected_at > datetime\\('now','-24 hours'\\)\")",
+      "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT COUNT\\(*\\) FROM trades WHERE dry_run=0\")",
+      "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT COUNT\\(*\\) FROM gaps WHERE executed=1\")",
+      "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT AVG\\(gap_cents\\), MIN\\(gap_cents\\), MAX\\(gap_cents\\) FROM gaps LIMIT 1000\")",
+      "Bash(sqlite3 *)"
     ]
   }
 }

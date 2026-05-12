@@ -3,8 +3,9 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
 from tracker import _create_tables, log_trade, log_gap, get_open_live_trades, resolve_trade
-from reconciler import compute_actual_profit, ResolutionResult
+from reconciler import compute_actual_profit, ResolutionResult, _fetch_kalshi_settlement
 
 
 def make_trade(db, *, amount_usdc=50.0, expected_profit=2.0, dry_run=False):
@@ -91,3 +92,62 @@ def test_resolve_trade_updates_status(db):
     row = db.execute("SELECT actual_profit, status FROM trades WHERE id=?", (trade_id,)).fetchone()
     assert row["actual_profit"] == pytest.approx(1.5)
     assert row["status"] == "profit"
+
+
+@pytest.mark.asyncio
+async def test_fetch_kalshi_settlement_settled_yes():
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value={"market": {"status": "settled", "result": "yes"}})
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+
+    result = await _fetch_kalshi_settlement(mock_session, "KXTEST-25DEC")
+    assert result == "YES"
+
+
+@pytest.mark.asyncio
+async def test_fetch_kalshi_settlement_settled_no():
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value={"market": {"status": "settled", "result": "no"}})
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+
+    result = await _fetch_kalshi_settlement(mock_session, "KXTEST-25DEC")
+    assert result == "NO"
+
+
+@pytest.mark.asyncio
+async def test_fetch_kalshi_settlement_open_returns_none():
+    mock_resp = AsyncMock()
+    mock_resp.status = 200
+    mock_resp.json = AsyncMock(return_value={"market": {"status": "open", "result": None}})
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+
+    result = await _fetch_kalshi_settlement(mock_session, "KXTEST-25DEC")
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_kalshi_settlement_404_returns_none():
+    mock_resp = AsyncMock()
+    mock_resp.status = 404
+    mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+    mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+    mock_session = MagicMock()
+    mock_session.get = MagicMock(return_value=mock_resp)
+
+    result = await _fetch_kalshi_settlement(mock_session, "KXTEST-25DEC")
+    assert result is None

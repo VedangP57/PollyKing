@@ -1,5 +1,6 @@
 import json
 import re
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -7,6 +8,17 @@ from typing import Optional
 from rapidfuzz import fuzz
 
 FUZZY_THRESHOLD = 85.0
+
+# Words too common to be useful in a match index
+_STOPWORDS = frozenset({
+    "will", "the", "a", "an", "in", "on", "at", "for", "to", "of", "and",
+    "or", "is", "be", "by", "from", "that", "this", "with", "are", "was",
+    "were", "has", "have", "had", "do", "does", "did", "what", "who",
+    "which", "when", "where", "how", "it", "its", "if", "as", "up", "out",
+    "not", "no", "yes", "than", "more", "most", "least", "any", "all",
+    "before", "after", "during", "between", "over", "under", "about",
+    "market", "markets", "win", "wins", "winner", "outcome", "result",
+})
 
 
 @dataclass
@@ -45,12 +57,22 @@ class Matcher:
         polymarket_markets: list[dict],
         kalshi_markets: list[dict],
     ) -> list[MarketPair]:
-        """Cross-platform matching: Polymarket vs Kalshi."""
+        """Cross-platform matching: Polymarket vs Kalshi.
+
+        Uses an inverted token index so each Poly market only fuzzy-scores
+        against Kalshi markets that share at least one meaningful keyword —
+        typically 10-50 candidates instead of all 5000. O(n×k) not O(n×m).
+        """
         results: list[MarketPair] = []
         matched_kalshi: set[str] = set()
-
-        for poly in polymarket_markets:
-            pair = self._find_match(poly, kalshi_markets, matched_kalshi)
+        print(f"  Building token index for {len(kalshi_markets)} Kalshi markets...", flush=True)
+        token_index = _build_token_index(kalshi_markets)
+        total = len(polymarket_markets)
+        print(f"  Matching {total} Polymarket markets...", flush=True)
+        for i, poly in enumerate(polymarket_markets):
+            if i and i % 500 == 0:
+                print(f"  Matching: {i}/{total} ({len(results)} matches so far)...", flush=True)
+            pair = self._find_match(poly, kalshi_markets, matched_kalshi, token_index)
             if pair:
                 results.append(pair)
                 matched_kalshi.add(pair.kalshi_ticker)
@@ -165,6 +187,7 @@ class Matcher:
         poly: dict,
         kalshi_markets: list[dict],
         matched_kalshi: set[str],
+        token_index: Optional[dict] = None,
     ) -> Optional[MarketPair]:
         poly_slug = poly.get("slug", poly.get("conditionId", ""))
         poly_title = _normalize(poly.get("question", poly.get("title", "")))
@@ -189,7 +212,37 @@ class Matcher:
                         polymarket_title=poly_title,
                     )
 
-        for kalshi in kalshi_markets:
+        # Build candidate list using inverted index — only Kalshi markets that share
+        # at least one meaningful keyword with this Poly title. Reduces ~5000 fuzzy
+        # comparisons to ~10-50 per market on real diverse market data.
+        # Cap at 300 by overlap count to handle pathological cases (e.g. all markets
+        # share a common word like "rate" or "election") without scanning everything.
+        # Fall back to full scan if title is empty or yields no candidates.
+        if token_index is not None and poly_title:
+            poly_tokens = _tokenize(poly_title)
+            seen_tickers: set[str] = set()
+            candidates: list[dict] = []
+            overlap_count: dict[str, int] = defaultdict(int)
+            for token in poly_tokens:
+                for k in token_index.get(token, []):
+                    t = k.get("ticker", "")
+                    if t and t not in matched_kalshi:
+                        if t not in seen_tickers:
+                            seen_tickers.add(t)
+                            candidates.append(k)
+                        overlap_count[t] += 1
+            # Sort highest overlap first — true matches bubble up, enables early exit
+            candidates.sort(key=lambda k: overlap_count.get(k.get("ticker", ""), 0), reverse=True)
+            # Cap: top 300 by overlap. In real diverse data, true match is in top 10;
+            # the cap only matters when many markets share generic tokens.
+            if len(candidates) > 300:
+                candidates = candidates[:300]
+            if not candidates:
+                candidates = kalshi_markets
+        else:
+            candidates = kalshi_markets
+
+        for kalshi in candidates:
             ticker = kalshi.get("ticker", "")
             if ticker in matched_kalshi:
                 continue
@@ -260,6 +313,25 @@ class Matcher:
 
         data["manual_pairs"].append(entry)
         path.write_text(json.dumps(data, indent=2))
+
+
+def _tokenize(text: str) -> set[str]:
+    """Extract meaningful 3+ char words for inverted index lookup."""
+    return {w for w in re.findall(r'\b[a-z]{3,}\b', text) if w not in _STOPWORDS}
+
+
+def _build_token_index(kalshi_markets: list[dict]) -> dict[str, list[dict]]:
+    """One-time O(m) build of inverted index: token → Kalshi markets containing it.
+
+    Each Polymarket title can then retrieve only markets sharing at least one
+    keyword instead of scanning all m=5000 Kalshi markets every time.
+    """
+    index: dict[str, list[dict]] = defaultdict(list)
+    for market in kalshi_markets:
+        title = _normalize(market.get("title", market.get("subtitle", "")))
+        for token in _tokenize(title):
+            index[token].append(market)
+    return dict(index)
 
 
 def _extract_yes_token(market: dict) -> str:

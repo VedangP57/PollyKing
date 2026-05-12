@@ -87,6 +87,42 @@ def _create_tables(conn: sqlite3.Connection) -> None:
             status TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS execution_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trade_id INTEGER REFERENCES trades(id),
+            opp_id TEXT,
+            pair_type TEXT NOT NULL,
+            market_id TEXT NOT NULL,
+            signal_poly_price REAL,
+            signal_kalshi_price REAL,
+            signal_gap_cents REAL,
+            signal_poly_liquidity REAL,
+            signal_kalshi_liquidity REAL,
+            signal_at TEXT NOT NULL,
+            submitted_poly_price REAL,
+            submitted_kalshi_price REAL,
+            price_buffer_applied REAL DEFAULT 0.0,
+            submitted_at TEXT,
+            filled_poly_price REAL,
+            filled_kalshi_price REAL,
+            filled_at TEXT,
+            fill_latency_ms INTEGER,
+            poly_slippage_cents REAL,
+            kalshi_slippage_cents REAL,
+            total_slippage_cents REAL,
+            post_poly_price REAL,
+            post_kalshi_price REAL,
+            market_drift_cents REAL,
+            poly_fill_status TEXT,
+            kalshi_fill_status TEXT,
+            poly_fill_fraction REAL DEFAULT 1.0,
+            kalshi_fill_fraction REAL DEFAULT 1.0,
+            is_partial INTEGER DEFAULT 0,
+            is_toxic INTEGER DEFAULT 0,
+            urgency TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
         CREATE TABLE IF NOT EXISTS opportunities (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             opp_key TEXT NOT NULL UNIQUE,
@@ -124,6 +160,9 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_opp_key ON opportunities(opp_key);
         CREATE INDEX IF NOT EXISTS idx_opp_state ON opportunities(state, last_seen DESC);
         CREATE INDEX IF NOT EXISTS idx_opp_market ON opportunities(market_id, state);
+        CREATE INDEX IF NOT EXISTS idx_exec_trade ON execution_events(trade_id);
+        CREATE INDEX IF NOT EXISTS idx_exec_market ON execution_events(market_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_exec_slippage ON execution_events(total_slippage_cents);
     """)
     conn.commit()
 
@@ -401,5 +440,60 @@ def close_opportunity(conn: sqlite3.Connection, opp_key: str, state: str, reason
     conn.execute(
         "UPDATE opportunities SET state=?, closed_at=?, collapse_reason=? WHERE opp_key=?",
         (state, now, reason, opp_key),
+    )
+    conn.commit()
+
+
+def log_execution_event(conn: sqlite3.Connection, evt: dict) -> int:
+    cur = conn.execute(
+        """INSERT INTO execution_events
+           (trade_id, opp_id, pair_type, market_id,
+            signal_poly_price, signal_kalshi_price, signal_gap_cents,
+            signal_poly_liquidity, signal_kalshi_liquidity, signal_at,
+            submitted_poly_price, submitted_kalshi_price, price_buffer_applied, submitted_at,
+            urgency)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            evt.get("trade_id"), evt.get("opp_id"),
+            evt.get("pair_type", "cross_platform"), evt["market_id"],
+            evt.get("signal_poly_price"), evt.get("signal_kalshi_price"),
+            evt.get("signal_gap_cents"), evt.get("signal_poly_liquidity"),
+            evt.get("signal_kalshi_liquidity"), evt["signal_at"],
+            evt.get("submitted_poly_price"), evt.get("submitted_kalshi_price"),
+            evt.get("price_buffer_applied", 0.0), evt.get("submitted_at"),
+            evt.get("urgency"),
+        ),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def update_execution_fill(conn: sqlite3.Connection, exec_id: int, fill_data: dict) -> None:
+    poly_filled = fill_data.get("filled_poly_price", 0.0)
+    kalshi_filled = fill_data.get("filled_kalshi_price", 0.0)
+    signal_poly = fill_data.get("signal_poly_price", poly_filled)
+    signal_kalshi = fill_data.get("signal_kalshi_price", kalshi_filled)
+    poly_slip = (poly_filled - signal_poly) * 100.0 if poly_filled and signal_poly else None
+    kalshi_slip = (kalshi_filled - signal_kalshi) * 100.0 if kalshi_filled and signal_kalshi else None
+    total_slip = (poly_slip or 0.0) + (kalshi_slip or 0.0) if poly_slip is not None or kalshi_slip is not None else None
+    now = datetime.now(timezone.utc).isoformat()
+    conn.execute(
+        """UPDATE execution_events SET
+               filled_poly_price=?, filled_kalshi_price=?, filled_at=?,
+               fill_latency_ms=?, poly_slippage_cents=?, kalshi_slippage_cents=?,
+               total_slippage_cents=?, poly_fill_status=?, kalshi_fill_status=?,
+               poly_fill_fraction=?, kalshi_fill_fraction=?,
+               is_partial=?, trade_id=?
+           WHERE id=?""",
+        (
+            poly_filled, kalshi_filled, now,
+            fill_data.get("fill_latency_ms"),
+            poly_slip, kalshi_slip, total_slip,
+            fill_data.get("poly_fill_status"), fill_data.get("kalshi_fill_status"),
+            fill_data.get("poly_fill_fraction", 1.0), fill_data.get("kalshi_fill_fraction", 1.0),
+            1 if fill_data.get("is_partial") else 0,
+            fill_data.get("trade_id"),
+            exec_id,
+        ),
     )
     conn.commit()
