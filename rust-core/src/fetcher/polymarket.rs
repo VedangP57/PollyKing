@@ -206,10 +206,14 @@ async fn run_ws_session(
     let mut hb = tokio::time::interval(Duration::from_secs(HEARTBEAT_SECS));
     hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    const ZOMBIE_TIMEOUT_SECS: u64 = 30;
+    let mut last_book_event = std::time::Instant::now();
+
     loop {
         tokio::select! {
             msg = ws_stream.next() => match msg {
                 Some(Ok(Message::Text(text))) => {
+                    last_book_event = std::time::Instant::now();
                     handle_price_message(&text, price_map, price_watch_tx);
                 }
                 Some(Ok(Message::Ping(data))) => {
@@ -228,6 +232,14 @@ async fn run_ws_session(
                 _ => {}
             },
             _ = hb.tick() => {
+                if last_book_event.elapsed().as_secs() > ZOMBIE_TIMEOUT_SECS {
+                    warn!(
+                        "Polymarket WS zombie detected — no book events for {}s — forcing reconnect",
+                        last_book_event.elapsed().as_secs()
+                    );
+                    let _ = ws_stream.close(None).await;
+                    return Err(anyhow::anyhow!("zombie_ws: no data for {}s", ZOMBIE_TIMEOUT_SECS));
+                }
                 let _ = ws_stream.send(Message::Text("PING".to_string())).await;
             }
             Some(new_tokens) = sub_rx.recv() => {
