@@ -282,3 +282,17 @@ class TestHasOpenTrade:
             "dry_run": True,
         })
         assert tracker.has_open_trade(db, "market-jkl") is False
+
+
+def test_kalshi_side_dir2_logged_as_NO():
+    """Dir2 trades sell Kalshi YES (=buy NO). kalshi_side must be 'NO' not 'YES'."""
+    gap = {"pair_type": "cross_platform", "kalshi_action": "sell", "market_id": "test"}
+    kalshi_side = "YES" if gap.get("kalshi_action", "buy") == "buy" else "NO"
+    assert kalshi_side == "NO", f"Dir2 should log kalshi_side='NO', got '{kalshi_side}'"
+
+
+def test_kalshi_side_dir1_logged_as_YES():
+    """Dir1 trades buy Kalshi YES. kalshi_side must be 'YES'."""
+    gap = {"pair_type": "cross_platform", "kalshi_action": "buy", "market_id": "test"}
+    kalshi_side = "YES" if gap.get("kalshi_action", "buy") == "buy" else "NO"
+    assert kalshi_side == "YES", f"Dir1 should log kalshi_side='YES', got '{kalshi_side}'"

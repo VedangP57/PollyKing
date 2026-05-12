@@ -311,12 +311,13 @@ async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegEx
 
     pair_type = gap.get("pair_type", "cross_platform")
     poly_side = "YES" if pair_type == "internal" else "NO"
+    kalshi_side = "YES" if gap.get("kalshi_action", "buy") == "buy" else "NO"
     trade = {
         "gap_id": gap_id,
         "polymarket_order_id": confirmation.get("polymarket_order_id"),
         "kalshi_order_id": confirmation.get("kalshi_order_id"),
         "polymarket_side": poly_side,
-        "kalshi_side": "YES",
+        "kalshi_side": kalshi_side,
         "polymarket_amount": confirmation.get("total_spent", 0) / 2,
         "kalshi_amount": confirmation.get("total_spent", 0) / 2,
         "amount_usdc": confirmation.get("total_spent"),
