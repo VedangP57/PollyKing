@@ -61,6 +61,8 @@ pub struct Gap {
     pub poly_liquidity_usdc: f64,
     /// Executable notional at top of Kalshi order book (ask_size × price)
     pub kalshi_liquidity_usdc: f64,
+    /// Kalshi best-ask minus best-bid in cents; 0.0 for internal pairs (unknown)
+    pub kalshi_spread_cents: f64,
 }
 
 impl Gap {
@@ -89,6 +91,7 @@ impl Gap {
             timestamp: Utc::now().to_rfc3339(),
             poly_liquidity_usdc,
             kalshi_liquidity_usdc,
+            kalshi_spread_cents: 0.0,
         }
     }
 }

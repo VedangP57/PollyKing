@@ -456,3 +456,66 @@ def test_dir1_gap_passes_ev_gate(make_db):
     # With CORRECT formula: combined = 0.39+0.55 = 0.94 → ev = 6¢ → passes EV gate
     # With OLD formula: combined = (1-0.39)+0.55 = 1.16 → ev = -16¢ → FAILS EV gate
     assert ok, f"Dir1 gap rejected: {reason}"
+
+
+def test_edge_spread_gate_rejects_low_ratio(make_db):
+    """gap_cents / kalshi_spread_cents < 3.0 → rejected by edge/spread gate."""
+    config = {
+        "ev_min_cents": 1.0, "ev_taker_fee_rate": 0.02, "ev_slippage_cents": 0.5,
+        "min_bet_usdc": 10.0, "max_bet_usdc": 100.0, "max_daily_loss_usdc": 50.0,
+        "max_open_positions": 5, "cross_platform_min_gap_cents": 5.0,
+        "internal_min_gap_cents": 8.0, "kalshi_fee_per_contract": 0.0,
+        "min_edge_to_spread_ratio": 3.0,
+    }
+    detector = GapDetector(config, make_db)
+    gap = {
+        "pair_type": "cross_platform",
+        "market_id": "test-spread-bad",
+        "polymarket_price": 0.39,
+        "kalshi_price": 0.55,
+        "kalshi_action": "buy",
+        "gap_cents": 6.0,
+        "kalshi_spread_cents": 8.0,  # ratio = 6/8 = 0.75 < 3.0 → reject
+        "polymarket_token": "tok-no",
+        "kalshi_ticker": "TICK-A",
+        "confidence": "high",
+        "poly_liquidity_usdc": 200.0,
+        "kalshi_liquidity_usdc": 200.0,
+        "fee_rate": 0.02,
+    }
+    for _ in range(3):
+        ok, reason = detector.validate(gap)
+    assert not ok, "Expected rejection by edge/spread gate"
+    assert "Edge/spread ratio" in reason, f"Wrong rejection reason: {reason}"
+
+
+def test_edge_spread_gate_passes_high_ratio(make_db):
+    """gap_cents / kalshi_spread_cents >= 3.0 → NOT rejected by this gate."""
+    config = {
+        "ev_min_cents": 1.0, "ev_taker_fee_rate": 0.02, "ev_slippage_cents": 0.5,
+        "min_bet_usdc": 10.0, "max_bet_usdc": 100.0, "max_daily_loss_usdc": 50.0,
+        "max_open_positions": 5, "cross_platform_min_gap_cents": 5.0,
+        "internal_min_gap_cents": 8.0, "kalshi_fee_per_contract": 0.0,
+        "min_edge_to_spread_ratio": 3.0,
+    }
+    detector = GapDetector(config, make_db)
+    gap = {
+        "pair_type": "cross_platform",
+        "market_id": "test-spread-good",
+        "polymarket_price": 0.39,
+        "kalshi_price": 0.55,
+        "kalshi_action": "buy",
+        "gap_cents": 6.0,
+        "kalshi_spread_cents": 1.5,  # ratio = 6/1.5 = 4.0 >= 3.0 → gate passes
+        "polymarket_token": "tok-no",
+        "kalshi_ticker": "TICK-A",
+        "confidence": "high",
+        "poly_liquidity_usdc": 200.0,
+        "kalshi_liquidity_usdc": 200.0,
+        "fee_rate": 0.02,
+    }
+    for _ in range(3):
+        ok, reason = detector.validate(gap)
+    # If rejected, must NOT be because of the edge/spread gate
+    if not ok:
+        assert "Edge/spread ratio" not in reason, f"Should not be rejected by spread gate: {reason}"

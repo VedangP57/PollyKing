@@ -122,6 +122,18 @@ class GapDetector:
                 f"< min ${min_liq:.1f}"
             )
 
+        # Check 1c: Edge-to-spread ratio gate
+        # kalshi_spread_cents=0.0 means unknown (internal pairs) — skip gate.
+        kalshi_spread_cents = gap.get("kalshi_spread_cents", 0.0)
+        min_ratio = self.config.get("min_edge_to_spread_ratio", 3.0)
+        if kalshi_spread_cents > 0 and min_ratio > 0:
+            edge_to_spread = gap_cents / kalshi_spread_cents
+            if edge_to_spread < min_ratio:
+                return False, (
+                    f"Edge/spread ratio {edge_to_spread:.2f} < {min_ratio:.1f} "
+                    f"(gap {gap_cents:.1f}¢ / spread {kalshi_spread_cents:.1f}¢)"
+                )
+
         # Check 1b: Per-pair-type minimum gap threshold
         # Internal pairs have a higher bar (negRisk mechanics more complex)
         if pair_type == "internal":

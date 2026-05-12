@@ -106,7 +106,7 @@ fn check_cross_platform(
                 "CrossPlatform dir1: {} | PolyNO:{:.4} KalshiYES(ask):{:.4} | {:.1}c",
                 pair.market_id, poly.no_price, kalshi.yes_ask, gap1
             );
-            let gap = Gap::new(
+            let mut gap = Gap::new(
                 "cross_platform".into(),
                 pair.market_id.clone(),
                 poly.no_price,    // execution price: buy Poly NO (crosses NO ask)
@@ -118,6 +118,7 @@ fn check_cross_platform(
                 poly_liq1,
                 kalshi_liq1,
             );
+            gap.kalshi_spread_cents = (kalshi.yes_ask - kalshi.yes_price) * 100.0;
             let _ = gap_tx.try_send(gap);
         }
     }
@@ -140,7 +141,7 @@ fn check_cross_platform(
                 "CrossPlatform dir2: {} | PolyYES(ask):{:.4} KalshiNO:{:.4} | {:.1}c",
                 pair.market_id, poly.yes_ask, kalshi.no_price, gap2
             );
-            let gap = Gap::new(
+            let mut gap = Gap::new(
                 "cross_platform".into(),
                 format!("{}-rev", pair.market_id),
                 poly.yes_ask,      // execution price: buy Poly YES (crosses YES ask)
@@ -152,6 +153,7 @@ fn check_cross_platform(
                 poly_liq2,
                 kalshi_liq2,
             );
+            gap.kalshi_spread_cents = (kalshi.yes_ask - kalshi.yes_price) * 100.0;
             let _ = gap_tx.try_send(gap);
         }
     }
