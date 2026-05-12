@@ -66,6 +66,7 @@ pub struct Gap {
 }
 
 impl Gap {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pair_type: String,
         market_id: String,

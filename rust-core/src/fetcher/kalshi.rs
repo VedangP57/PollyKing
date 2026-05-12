@@ -256,6 +256,7 @@ fn handle_ws_message(
 // Single WS session (reconnect loop lives in `run`)
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ws_session(
     api_url: &str,
     api_key: &str,
