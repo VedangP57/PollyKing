@@ -59,6 +59,12 @@ class PolymarketExecutor:
                                 self._fee_cache[tid] = float(fee_str)
                             except (ValueError, TypeError):
                                 pass
+            missing = set(token_ids) - set(self._fee_cache)
+            if missing:
+                log.warning(
+                    "Fee cache: %d/%d tokens not returned by CLOB API — will use defaults: %s",
+                    len(missing), len(token_ids), missing,
+                )
             log.info("Fee cache warmed: %d tokens", len(self._fee_cache))
         except Exception as e:
             log.warning("Fee cache warm-up failed (%s) — using flat default 0.02 for all tokens", e)

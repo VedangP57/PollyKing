@@ -218,7 +218,7 @@ async def main():
     if _poly_tokens and not CONFIG.get("dry_run", True):
         try:
             await executor._poly.warm_fee_cache(_poly_tokens)
-            CONFIG["_fee_cache"] = executor._poly._fee_cache
+            CONFIG["_fee_cache"] = dict(executor._poly._fee_cache)
         except Exception as e:
             notifier.logger.warning("Fee cache warm-up failed: %s — continuing with defaults", e)
 
