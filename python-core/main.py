@@ -20,6 +20,7 @@ from reconciler import Reconciler
 from bayes_engine import BayesEngine
 from risk_engine import RiskEngine
 from startup_audit import audit_orphan_positions
+import startup_check
 
 load_dotenv()
 
@@ -170,6 +171,8 @@ async def main():
             f"Rust binary not found at {rust_bin}. Run: cd rust-core && cargo build --release"
         )
         sys.exit(1)
+
+    await startup_check.run_all(CONFIG)
 
     rust_process = await asyncio.create_subprocess_exec(
         rust_bin,
