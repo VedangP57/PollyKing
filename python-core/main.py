@@ -21,6 +21,7 @@ from bayes_engine import BayesEngine
 from risk_engine import RiskEngine
 from startup_audit import audit_orphan_positions
 import startup_check
+from circuit_breaker import CircuitBreaker
 
 load_dotenv()
 
@@ -85,6 +86,7 @@ _TRADE_COOLDOWN = 300.0  # seconds before same market can trade again (secondary
 # Memory: bounded by number of distinct markets seen (typically <200 in markets.json).
 # Concurrency-safe: read+write in _handle_gap_inner are synchronous (no await between).
 _prev_prices: dict[str, float] = {}
+_circuit_breaker = CircuitBreaker()
 
 # Semaphore: max concurrent live API calls — prevents rate limiting on both exchanges
 _GAP_SEMAPHORE: asyncio.Semaphore | None = None
@@ -292,6 +294,10 @@ async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegEx
     if now - _last_traded.get(market_id, 0) < _TRADE_COOLDOWN:
         return
 
+    if _circuit_breaker.is_open(market_id):
+        notifier.logger.warning("circuit_breaker open for %s — skipping", market_id)
+        return
+
     is_valid, reason = detector.validate(gap)
     if not is_valid:
         notifier.gap_rejected(market_id, reason)
@@ -309,6 +315,7 @@ async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegEx
 
     if not confirmation:
         notifier.logger.warning(f"Execution failed for {market_id} — gap logged, no trade")
+        _circuit_breaker.record_failure(market_id)
         _metrics.inc_execution(
             pair_type=gap.get("pair_type", "cross_platform"),
             dry_run=CONFIG.get("dry_run", True),
@@ -316,6 +323,7 @@ async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegEx
         )
         return
 
+    _circuit_breaker.reset(market_id)
     _metrics.inc_execution(
         pair_type=gap.get("pair_type", "cross_platform"),
         dry_run=CONFIG.get("dry_run", True),

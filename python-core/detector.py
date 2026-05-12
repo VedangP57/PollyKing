@@ -4,10 +4,13 @@ from pathlib import Path
 from typing import Optional
 import json
 
+import logging
 import sqlite3
 from ev_engine import calculate_arb_ev
 from risk_engine import RiskEngine
 from tracker import get_daily_loss, get_open_position_count, has_open_trade
+
+log = logging.getLogger(__name__)
 
 
 class GapDetector:
@@ -176,7 +179,15 @@ class GapDetector:
         daily_loss = get_daily_loss(self.db_conn)
         max_loss = self.config.get("max_daily_loss_usdc", 50.0)
         if daily_loss >= max_loss:
-            return False, f"Daily loss limit hit: ${daily_loss:.2f} >= ${max_loss:.2f}"
+            log.critical(
+                "DAILY LOSS LIMIT REACHED: $%.2f >= $%.2f — writing kill switch and shutting down",
+                daily_loss, max_loss,
+            )
+            self.db_conn.execute(
+                "INSERT OR REPLACE INTO bot_state (key, value) VALUES ('kill_switch', '1')",
+            )
+            self.db_conn.commit()
+            raise SystemExit(1)
 
         # Check 6: Open position count
         open_positions = get_open_position_count(self.db_conn)

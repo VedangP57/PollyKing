@@ -73,7 +73,14 @@ class TwoLegExecutor:
             min_bet_usdc=min_bet,
             max_bet_usdc=max_bet,
         )
-        return result["bet_usdc"] if result["action"] == "BET" else min_bet
+        bet_size = result["bet_usdc"] if result["action"] == "BET" else min_bet
+        max_depth_fraction = self._config.get("max_depth_fraction", 0.25)
+        poly_liq = gap.get("poly_liquidity_usdc", float("inf"))
+        kalshi_liq = gap.get("kalshi_liquidity_usdc", float("inf"))
+        depth_cap = min(poly_liq, kalshi_liq) * max_depth_fraction
+        bet_size = min(bet_size, depth_cap)
+        bet_size = max(bet_size, min_bet)
+        return bet_size
 
     def _dry_run_confirmation(self, gap: dict, bet_size: float) -> dict:
         # polymarket_price and kalshi_price are now the actual leg prices (set correctly by Rust)

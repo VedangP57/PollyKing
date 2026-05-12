@@ -558,3 +558,28 @@ async def test_internal_legb_fill_verified():
 
     # Both tok1 and tok2 order IDs should have been polled
     assert len(poly_fills) == 2, f"Expected 2 fill polls (both legs), got {len(poly_fills)}: {poly_fills}"
+
+
+def test_depth_cap_limits_bet(config):
+    gap = {
+        "pair_type": "cross_platform",
+        "market_id": "test-depth",
+        "polymarket_price": 0.60,
+        "kalshi_price": 0.30,
+        "gap_cents": 10.0,
+        "confidence": "high",
+        "poly_liquidity_usdc": 80.0,   # min liquidity is 80
+        "kalshi_liquidity_usdc": 200.0,
+        "fee_rate": 0.02,
+    }
+    # With max_depth_fraction=0.25: depth_cap = min(80, 200) * 0.25 = 20.0
+    # Kelly might produce 25+ on a 500 bankroll × 0.25 fraction with this gap
+    # But bet must be capped at 20.0
+    config["max_depth_fraction"] = 0.25
+    executor = TwoLegExecutor.__new__(TwoLegExecutor)
+    executor._config = config
+
+    bet = executor._compute_bet_size(gap)
+
+    assert bet <= 20.0, f"Expected bet capped at 20.0, got {bet}"
+    assert bet >= config["min_bet_usdc"], "Bet must not go below minimum"

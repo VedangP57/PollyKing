@@ -15,7 +15,9 @@ import asyncio
 import json
 import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import aiohttp
 from dotenv import load_dotenv
@@ -142,6 +144,72 @@ async def fetch_kalshi_markets(session: aiohttp.ClientSession) -> list[dict]:
     return markets
 
 
+def _parse_iso(s: str) -> Optional[datetime]:
+    """Parse ISO-8601 string to UTC-aware datetime; returns None on failure."""
+    if not s:
+        return None
+    s = s.rstrip("Z")
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def compute_resolution_delta_hours(
+    kalshi_market: dict, poly_market: dict
+) -> Optional[float]:
+    """Return absolute delta in hours between Kalshi close_time and Polymarket endDate.
+
+    Returns None if either date is missing or unparseable.
+    """
+    kalshi_dt = _parse_iso(kalshi_market.get("close_time", ""))
+    poly_dt = _parse_iso(
+        poly_market.get("end_date_iso") or poly_market.get("endDate", "")
+    )
+    if kalshi_dt is None or poly_dt is None:
+        return None
+    return abs((kalshi_dt - poly_dt).total_seconds()) / 3600.0
+
+
+def filter_resolution_mismatches(
+    pairs: list[dict],
+    kalshi_by_ticker: dict[str, dict],
+    poly_by_token: dict[str, dict],
+    max_delta_hours: float = 6.0,
+) -> tuple[list[dict], list[dict]]:
+    """Split pairs into (kept, mismatches).
+
+    - delta > max_delta_hours → excluded (added to mismatches)
+    - 0 < delta <= max_delta_hours → kept with confidence downgraded to "low"
+    - delta == 0 or dates unavailable → kept unchanged
+    """
+    kept: list[dict] = []
+    mismatches: list[dict] = []
+
+    for pair in pairs:
+        ticker = pair.get("kalshi_ticker", "")
+        token = pair.get("token_a", "")
+        kalshi_mkt = kalshi_by_ticker.get(ticker, {})
+        poly_mkt = poly_by_token.get(token, {})
+
+        delta = compute_resolution_delta_hours(kalshi_mkt, poly_mkt)
+        if delta is None:
+            kept.append(pair)
+            continue
+
+        if delta > max_delta_hours:
+            mismatches.append({**pair, "delta_hours": delta})
+        else:
+            entry = {**pair}
+            if delta > 0:
+                entry["confidence"] = "low"
+            kept.append(entry)
+
+    return kept, mismatches
+
+
 async def main():
     print(f"Backfilling market pairs — fetching Polymarket + Kalshi (public, no key required)...")
 
@@ -210,6 +278,36 @@ async def main():
     if kalshi_mode:
         cross_pairs = matcher.match(liquid_markets, kalshi_markets)
         internal_pairs = matcher.create_internal_pairs(liquid_markets, full_markets=poly_markets)
+
+        # Resolution mismatch check — filter cross-platform pairs only
+        max_delta_h = float(os.getenv("MAX_RESOLUTION_DELTA_HOURS", "6"))
+        kalshi_by_ticker = {m.get("ticker", ""): m for m in kalshi_markets if m.get("ticker")}
+        # Build token_a → poly market lookup via clobTokenIds
+        poly_by_token: dict[str, dict] = {}
+        for m in liquid_markets:
+            for token in m.get("clobTokenIds") or []:
+                poly_by_token[token] = m
+        cross_pair_dicts = [
+            {"pair_type": p.pair_type, "market_id": p.market_id,
+             "token_a": p.token_a, "kalshi_ticker": p.kalshi_ticker,
+             "confidence": p.confidence}
+            for p in cross_pairs
+        ]
+        kept_dicts, mismatch_dicts = filter_resolution_mismatches(
+            cross_pair_dicts, kalshi_by_ticker, poly_by_token, max_delta_hours=max_delta_h
+        )
+        if mismatch_dicts:
+            mismatch_path = Path(_resolve("DB_PATH", "data/trades.db")).parent / "resolution_mismatches.json"
+            mismatch_path.write_text(json.dumps(mismatch_dicts, indent=2))
+            print(f"  WARNING: {len(mismatch_dicts)} cross-platform pairs excluded due to resolution mismatch > {max_delta_h}h — see {mismatch_path}")
+        kept_market_ids = {d["market_id"] for d in kept_dicts}
+        cross_pairs = [p for p in cross_pairs if p.market_id in kept_market_ids]
+        # Apply confidence downgrades
+        conf_override = {d["market_id"]: d["confidence"] for d in kept_dicts}
+        for p in cross_pairs:
+            if conf_override.get(p.market_id) == "low":
+                p.confidence = "low"
+
         pairs = cross_pairs + internal_pairs
         print(f"  Cross-platform: {len(cross_pairs)} pairs | Internal fallback: {len(internal_pairs)} pairs")
     else:

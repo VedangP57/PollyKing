@@ -272,9 +272,10 @@ class TestDailyLossLimit:
         })
         tracker.update_trade_result(conn, trade_id, actual_profit=-60.0, status="resolved")
 
-        is_valid, reason = feed_gap(detector, BASE_GAP)
-        assert not is_valid
-        assert "daily loss" in reason.lower()
+        # Now raises SystemExit(1) and writes kill switch instead of returning False
+        with pytest.raises(SystemExit) as exc_info:
+            feed_gap(detector, BASE_GAP)
+        assert exc_info.value.code == 1
 
 
 class TestOpenPositionLimit:
@@ -519,3 +520,30 @@ def test_edge_spread_gate_passes_high_ratio(make_db):
     # If rejected, must NOT be because of the edge/spread gate
     if not ok:
         assert "Edge/spread ratio" not in reason, f"Should not be rejected by spread gate: {reason}"
+
+
+def test_daily_loss_shutdown_writes_kill_switch_and_exits(tmp_path):
+    db_path = tmp_path / "trades.db"
+    conn = tracker.init_db(str(db_path))
+    config = {"max_daily_loss_usdc": 0.01}
+    detector = GapDetector(config, conn)
+
+    gap_id = tracker.log_gap(conn, BASE_GAP)
+    trade_id = tracker.log_trade(conn, {
+        "gap_id": gap_id,
+        "amount_usdc": 100.0,
+        "expected_profit": -60.0,
+        "dry_run": False,
+    })
+    tracker.update_trade_result(conn, trade_id, actual_profit=-60.0, status="resolved")
+
+    # Stability check requires 3 consecutive valid gaps before daily-loss check runs
+    with pytest.raises(SystemExit) as exc_info:
+        for _ in range(3):
+            detector.validate(BASE_GAP)
+
+    assert exc_info.value.code == 1
+
+    row = conn.execute("SELECT value FROM bot_state WHERE key='kill_switch'").fetchone()
+    assert row is not None, "kill_switch must be written to DB on daily loss shutdown"
+    assert row[0] == "1"
