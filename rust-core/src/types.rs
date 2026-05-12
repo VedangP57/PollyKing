@@ -156,7 +156,7 @@ impl AppConfig {
             max_daily_loss_usdc: std::env::var("MAX_DAILY_LOSS_USDC").unwrap_or("50".into()).parse()?,
             max_open_positions: std::env::var("MAX_OPEN_POSITIONS").unwrap_or("5".into()).parse()?,
             polymarket_ws_url: std::env::var("POLYMARKET_WS_URL")
-                .unwrap_or("wss://ws-subscriptions.polymarket.com/ws/market".into()),
+                .unwrap_or("wss://ws-subscriptions-clob.polymarket.com".into()),
             polymarket_clob_url: std::env::var("POLYMARKET_CLOB_URL")
                 .unwrap_or("https://clob.polymarket.com".into()),
             polymarket_gamma_url: std::env::var("POLYMARKET_GAMMA_URL")
