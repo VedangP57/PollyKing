@@ -166,3 +166,73 @@ def test_use_fok_false_skips_fok():
     assert result["order_id"] == "gtc-456"
     types_called = [str(t) for t in call_order_types]
     assert not any("FOK" in t for t in types_called), f"FOK should not be called: {types_called}"
+
+
+# ---------------------------------------------------------------------------
+# Fee cache tests
+# ---------------------------------------------------------------------------
+
+from unittest.mock import AsyncMock
+
+
+@pytest.mark.asyncio
+async def test_fee_cache_populates():
+    """warm_fee_cache stores taker_fee_rate per token_id."""
+    config = {
+        "polymarket_private_key": "0x" + "a" * 64,
+        "polymarket_wallet_address": "0x" + "b" * 40,
+    }
+    executor = PolymarketExecutor(config)
+
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    mock_response.json = AsyncMock(return_value=[
+        {"token_id": "tok-abc", "taker_fee": "0.015"},
+        {"token_id": "tok-xyz", "taker_fee": "0.02"},
+    ])
+
+    mock_session = MagicMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.get = MagicMock(return_value=MagicMock(
+        __aenter__=AsyncMock(return_value=mock_response),
+        __aexit__=AsyncMock(return_value=False),
+    ))
+
+    with patch("polymarket_executor.aiohttp.ClientSession", return_value=mock_session):
+        await executor.warm_fee_cache(["tok-abc", "tok-xyz"])
+
+    assert executor._fee_cache["tok-abc"] == pytest.approx(0.015)
+    assert executor._fee_cache["tok-xyz"] == pytest.approx(0.02)
+
+
+@pytest.mark.asyncio
+async def test_fee_cache_miss_defaults():
+    """Token not in API response falls back to 0.02."""
+    config = {
+        "polymarket_private_key": "0x" + "a" * 64,
+        "polymarket_wallet_address": "0x" + "b" * 40,
+    }
+    executor = PolymarketExecutor(config)
+    # Don't call warm_fee_cache — cache is empty
+    assert executor._fee_cache.get("missing-token", 0.02) == 0.02
+
+
+@pytest.mark.asyncio
+async def test_fee_cache_api_error_falls_back():
+    """API error during warm_fee_cache logs warning but does not raise."""
+    config = {
+        "polymarket_private_key": "0x" + "a" * 64,
+        "polymarket_wallet_address": "0x" + "b" * 40,
+    }
+    executor = PolymarketExecutor(config)
+
+    mock_session = MagicMock()
+    mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+    mock_session.__aexit__ = AsyncMock(return_value=False)
+    mock_session.get = MagicMock(side_effect=Exception("network error"))
+
+    with patch("polymarket_executor.aiohttp.ClientSession", return_value=mock_session):
+        await executor.warm_fee_cache(["tok-abc"])  # must not raise
+
+    assert executor._fee_cache == {}

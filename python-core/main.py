@@ -69,6 +69,7 @@ CONFIG = {
     "kalshi_api_key": os.getenv("KALSHI_API_KEY", ""),
     "kalshi_api_secret": os.getenv("KALSHI_API_SECRET", ""),
     "kalshi_api_url": os.getenv("KALSHI_API_URL", "https://api.elections.kalshi.com/trade-api/v2"),
+    "fee_cache_refresh_s": float(os.getenv("FEE_CACHE_REFRESH_INTERVAL_S", "3600")),
 }
 
 rust_process = None
@@ -211,6 +212,15 @@ async def main():
     if not CONFIG["dry_run"]:
         notifier.logger.info("Auditing exchange positions for orphans from prior runs...")
         await audit_orphan_positions(executor._poly, executor._kalshi, db_conn)
+
+    # Warm per-token fee cache from Polymarket CLOB API
+    _poly_tokens = [p.get("token_a", "") for p in _pairs_data if p.get("token_a")]
+    if _poly_tokens and not CONFIG.get("dry_run", True):
+        try:
+            await executor._poly.warm_fee_cache(_poly_tokens)
+            CONFIG["_fee_cache"] = executor._poly._fee_cache
+        except Exception as e:
+            notifier.logger.warning("Fee cache warm-up failed: %s — continuing with defaults", e)
 
     reconciler = Reconciler(CONFIG, db_conn)
     asyncio.create_task(reconciler.run_forever())

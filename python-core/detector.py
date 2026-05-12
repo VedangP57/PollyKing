@@ -85,7 +85,9 @@ class GapDetector:
         # YES ask for dir2, YES price for internal). Add directly — no inversion.
         combined = poly_price + kalshi_price
 
-        taker_fee_rate = gap.get("fee_rate", self.config.get("ev_taker_fee_rate", 0.02))
+        fee_cache = self.config.get("_fee_cache", {})
+        poly_token = gap.get("polymarket_token", "")
+        taker_fee_rate = fee_cache.get(poly_token, gap.get("fee_rate", self.config.get("ev_taker_fee_rate", 0.02)))
         slippage_cents = self.config.get("ev_slippage_cents", 0.5)
         ev_min_cents = self.config.get("ev_min_cents", 1.0)
 

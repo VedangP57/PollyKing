@@ -1,11 +1,16 @@
 import asyncio
+import logging
 from typing import Optional
+
+import aiohttp
 
 from py_clob_client_v2 import ClobClient, OrderArgs, PartialCreateOrderOptions
 from py_clob_client_v2.clob_types import OrderPayload, OrderType
 from py_clob_client_v2.order_builder.constants import BUY, SELL
 
 from kalshi_executor import ExecutorError
+
+log = logging.getLogger(__name__)
 
 # Signature types per Polymarket docs:
 #   0 = EOA  (standard private-key wallet — use this for programmatic/API trading)
@@ -28,6 +33,35 @@ class PolymarketExecutor:
     def __init__(self, config: dict):
         self._config = config
         self._client: Optional[ClobClient] = None
+        self._fee_cache: dict[str, float] = {}
+
+    async def warm_fee_cache(self, token_ids: list[str]) -> None:
+        """Fetch taker fee rate for each token from CLOB API. Results cached in self._fee_cache."""
+        if not token_ids:
+            return
+        try:
+            async with aiohttp.ClientSession() as session:
+                params = [("token_id", tid) for tid in token_ids]
+                async with session.get(
+                    "https://clob.polymarket.com/markets",
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        log.warning("Fee cache: CLOB /markets returned %d — using defaults", resp.status)
+                        return
+                    data = await resp.json()
+                    for market in data if isinstance(data, list) else []:
+                        tid = market.get("token_id", "")
+                        fee_str = market.get("taker_fee", "")
+                        if tid and fee_str:
+                            try:
+                                self._fee_cache[tid] = float(fee_str)
+                            except (ValueError, TypeError):
+                                pass
+            log.info("Fee cache warmed: %d tokens", len(self._fee_cache))
+        except Exception as e:
+            log.warning("Fee cache warm-up failed (%s) — using flat default 0.02 for all tokens", e)
 
     def _get_client(self) -> ClobClient:
         if self._client is not None:
