@@ -13,7 +13,9 @@ from detector import GapDetector, _is_stable
 BASE_GAP = {
     "event": "gap_detected",
     "market_id": "test-market",
-    "polymarket_price": 0.71,
+    # Rust sends actual execution prices: poly.no_price=0.29, kalshi.yes_ask=0.58
+    # combined = 0.29+0.58 = 0.87 → gap = (1-0.87)*100 = 13¢
+    "polymarket_price": 0.29,
     "kalshi_price": 0.58,
     "gap_cents": 13.0,
     "polymarket_token": "token-abc",
@@ -70,13 +72,14 @@ class TestValidGap:
 
 class TestKalshiFeeModel:
     def test_kalshi_fee_kills_thin_gap(self):
-        # combined = (1-0.55) + 0.50 = 0.95 → gap=5¢
+        # Rust sends execution prices: poly.no_price=0.45, kalshi.yes_ask=0.50
+        # combined = 0.45+0.50 = 0.95 → gap=5¢
         # poly_fee = 0.02*0.95*100 = 1.9¢, slippage=0.5¢ → ev_net without Kalshi fee = 2.6¢ (positive)
         # With Kalshi fee: contracts=round(10/0.50)=20, fee=0.07*20=1.40 → fee_cents=14.0¢
         # ev_net = 2.6 - 14.0 = -11.4¢ → SKIP
         gap = {
             **BASE_GAP,
-            "polymarket_price": 0.55,
+            "polymarket_price": 0.45,
             "kalshi_price": 0.50,
             "gap_cents": 5.0,
         }
@@ -290,10 +293,11 @@ def test_cross_platform_gap_uses_per_pair_fee_rate():
         "max_daily_loss_usdc": 50.0, "max_open_positions": 999_999,
         "markets_json": "config/markets.json",
     })
-    # 6¢ gap, cross_platform (min=5c) — combined = (1-0.71)+0.58 = 0.87 < 0.95
+    # 6¢ gap, cross_platform (min=5c) — combined = 0.29+0.58 = 0.87 < 0.95
+    # Rust sends execution prices: poly.no_price=0.29, kalshi.yes_ask=0.58
     gap = {
         "market_id": "test-fee-market",
-        "polymarket_price": 0.71,
+        "polymarket_price": 0.29,
         "kalshi_price": 0.58,
         "gap_cents": 6.0,
         "confidence": "medium",
@@ -329,11 +333,11 @@ def test_ev_gate_uses_fee_and_slippage(tmp_path):
     detector = GapDetector(config, db)
 
     # combined = 0.94 → 6¢ gross gap → ev_net = 6 - 1.88 - 0.5 = 3.62¢ → passes 2¢ threshold
-    # cross_platform: combined = (1 - poly_price) + kalshi_price
-    # (1 - 0.65) + 0.59 = 0.35 + 0.59 = 0.94
+    # Rust sends execution prices: poly.no_price=0.35, kalshi.yes_ask=0.59
+    # combined = 0.35 + 0.59 = 0.94
     gap_ok = {
         "market_id": "test-market", "pair_type": "cross_platform",
-        "polymarket_price": 0.65, "kalshi_price": 0.59,
+        "polymarket_price": 0.35, "kalshi_price": 0.59,
         "gap_cents": 6.0, "confidence": "high",
     }
     # Feed 3 consecutive updates to pass the stability check
@@ -347,7 +351,7 @@ def test_ev_gate_uses_fee_and_slippage(tmp_path):
     detector2 = GapDetector(config2, db)
     gap_marginal = {
         "market_id": "test-market-2", "pair_type": "cross_platform",
-        "polymarket_price": 0.65, "kalshi_price": 0.59,
+        "polymarket_price": 0.35, "kalshi_price": 0.59,
         "gap_cents": 6.0, "confidence": "high",
     }
     for _ in range(3):
@@ -409,3 +413,46 @@ def test_sufficient_liquidity_passes_gate():
     }
     ok, reason = feed_gap(detector, gap)
     assert ok, f"Expected pass, got: {reason}"
+
+
+@pytest.fixture
+def make_db():
+    import sqlite3
+    from tracker import _create_tables
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    _create_tables(db)
+    return db
+
+
+def test_dir1_gap_passes_ev_gate(make_db):
+    """Dir1 cross-platform gap: Rust sends NO price as polymarket_price.
+    Combined = poly.no_price + kalshi.yes_ask — must NOT be inverted."""
+    config = {
+        "ev_min_cents": 1.0, "ev_taker_fee_rate": 0.02, "ev_slippage_cents": 0.5,
+        "min_bet_usdc": 10.0, "max_bet_usdc": 100.0, "max_daily_loss_usdc": 50.0,
+        "max_open_positions": 5, "cross_platform_min_gap_cents": 5.0,
+        "internal_min_gap_cents": 8.0, "kalshi_fee_per_contract": 0.0,
+    }
+    db = make_db
+    detector = GapDetector(config, db)
+    # Feed 3 identical observations to satisfy the stability check (needs 3 consecutive)
+    gap = {
+        "pair_type": "cross_platform",
+        "market_id": "test-dir1",
+        "polymarket_price": 0.39,   # poly.no_price — actual NO buy price from Rust
+        "kalshi_price": 0.55,       # kalshi.yes_ask — actual YES buy price
+        "kalshi_action": "buy",
+        "gap_cents": 6.0,           # (1 - 0.39 - 0.55) * 100 = 6¢
+        "polymarket_token": "tok-no",
+        "kalshi_ticker": "TICK-A",
+        "confidence": "high",
+        "poly_liquidity_usdc": 200.0,
+        "kalshi_liquidity_usdc": 200.0,
+        "fee_rate": 0.02,
+    }
+    for _ in range(3):
+        ok, reason = detector.validate(gap)
+    # With CORRECT formula: combined = 0.39+0.55 = 0.94 → ev = 6¢ → passes EV gate
+    # With OLD formula: combined = (1-0.39)+0.55 = 1.16 → ev = -16¢ → FAILS EV gate
+    assert ok, f"Dir1 gap rejected: {reason}"

@@ -81,12 +81,9 @@ class GapDetector:
                 return False, f"REJECTED: multi-outcome market ({outcome_count} outcomes, need exactly 2)"
 
         # Check 1: Net EV after fees and slippage must exceed ev_min_cents.
-        # Cross-platform: buy Poly NO + Kalshi YES → combined = (1-poly) + kalshi
-        # Internal negRisk: buy both YES tokens     → combined = poly + kalshi
-        if pair_type == "internal":
-            combined = poly_price + kalshi_price
-        else:
-            combined = (1.0 - poly_price) + kalshi_price
+        # Rust sends actual execution prices for both legs (NO price for dir1,
+        # YES ask for dir2, YES price for internal). Add directly — no inversion.
+        combined = poly_price + kalshi_price
 
         taker_fee_rate = gap.get("fee_rate", self.config.get("ev_taker_fee_rate", 0.02))
         slippage_cents = self.config.get("ev_slippage_cents", 0.5)
