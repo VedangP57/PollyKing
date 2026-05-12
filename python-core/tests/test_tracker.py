@@ -1,3 +1,4 @@
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -296,3 +297,58 @@ def test_kalshi_side_dir1_logged_as_YES():
     gap = {"pair_type": "cross_platform", "kalshi_action": "buy", "market_id": "test"}
     kalshi_side = "YES" if gap.get("kalshi_action", "buy") == "buy" else "NO"
     assert kalshi_side == "YES", f"Dir1 should log kalshi_side='YES', got '{kalshi_side}'"
+
+
+# ── Idempotency keys (Item 18) ──────────────────────────────────────────────
+
+@pytest.fixture
+def idem_db():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    tracker._create_tables(conn)
+    yield conn
+    conn.close()
+
+
+def test_trade_attempt_logged_before_order(idem_db):
+    attempt_id = tracker.log_trade_attempt(idem_db, {
+        "attempt_id": "uuid-aaa",
+        "market_id": "mkt-1",
+        "pair_type": "cross_platform",
+        "gap_cents": 8.0,
+        "bet_usdc": 25.0,
+    })
+    row = idem_db.execute(
+        "SELECT * FROM trade_attempts WHERE attempt_id='uuid-aaa'"
+    ).fetchone()
+    assert row is not None
+    assert row["confirmed"] == 0
+    assert float(row["bet_usdc"]) == pytest.approx(25.0)
+
+
+def test_confirm_trade_attempt_marks_row(idem_db):
+    tracker.log_trade_attempt(idem_db, {
+        "attempt_id": "uuid-bbb",
+        "market_id": "mkt-2",
+        "pair_type": "cross_platform",
+        "gap_cents": 5.0,
+        "bet_usdc": 10.0,
+    })
+    tracker.confirm_trade_attempt(idem_db, "uuid-bbb", trade_id=42)
+    row = idem_db.execute(
+        "SELECT * FROM trade_attempts WHERE attempt_id='uuid-bbb'"
+    ).fetchone()
+    assert row["confirmed"] == 1
+    assert row["trade_id"] == 42
+
+
+def test_unconfirmed_attempt_returned_by_query(idem_db):
+    tracker.log_trade_attempt(idem_db, {
+        "attempt_id": "uuid-ccc",
+        "market_id": "mkt-3",
+        "pair_type": "cross_platform",
+        "gap_cents": 6.0,
+        "bet_usdc": 15.0,
+    })
+    rows = tracker.get_unconfirmed_attempts(idem_db, max_age_minutes=60)
+    assert any(r["attempt_id"] == "uuid-ccc" for r in rows)

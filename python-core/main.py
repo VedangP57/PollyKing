@@ -227,6 +227,16 @@ async def main():
     reconciler = Reconciler(CONFIG, db_conn)
     asyncio.create_task(reconciler.run_forever())
 
+    async def _update_pnl_metric():
+        while True:
+            await asyncio.sleep(60)
+            try:
+                pnl = tracker.get_daily_pnl(db_conn)
+                _metrics.set_daily_pnl(pnl)
+            except Exception:
+                pass
+    asyncio.create_task(_update_pnl_metric())
+
     asyncio.create_task(_read_stderr(rust_process.stderr))
     asyncio.create_task(_read_stdout(rust_process.stdout, stdout_queue, detector, executor, db_conn, bayes_engine, fee_rate_map, _health_state, opp_engine))
 
@@ -250,6 +260,8 @@ async def _read_stdout(stdout, stdout_queue: asyncio.Queue, detector, executor, 
             platform = event.get("platform", "unknown")
             _metrics.inc_ws_reconnect(platform)
             notifier.logger.debug(f"WS reconnect: {platform}")
+        elif event_type == "ws_staleness":
+            _metrics.set_ws_staleness(float(event.get("seconds", 0)))
         elif event_type == "gap_detected":
             # Fire-and-forget: _handle_gap calls TwoLegExecutor directly.
             # We do not block here so _read_stdout can keep draining Rust stdout.
@@ -349,6 +361,12 @@ async def _handle_gap_inner(gap: dict, detector: GapDetector, executor: TwoLegEx
 
     notifier.trade_executed(trade)
     trade_id = tracker.log_trade(db_conn, trade)
+    _attempt_id = confirmation.get("_attempt_id")
+    if _attempt_id:
+        try:
+            tracker.confirm_trade_attempt(db_conn, _attempt_id, trade_id)
+        except Exception as _e:
+            notifier.logger.warning("confirm_trade_attempt failed (%s)", _e)
     tracker.mark_gap_executed(db_conn, gap_id)
     notifier.trade_logged(trade_id)
     if opp_engine is not None:

@@ -163,6 +163,18 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_exec_trade ON execution_events(trade_id);
         CREATE INDEX IF NOT EXISTS idx_exec_market ON execution_events(market_id, created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_exec_slippage ON execution_events(total_slippage_cents);
+        CREATE TABLE IF NOT EXISTS trade_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            attempt_id TEXT NOT NULL UNIQUE,
+            market_id TEXT NOT NULL,
+            pair_type TEXT NOT NULL,
+            gap_cents REAL,
+            bet_usdc REAL,
+            attempted_at TEXT NOT NULL DEFAULT (datetime('now')),
+            confirmed INTEGER DEFAULT 0,
+            trade_id INTEGER REFERENCES trades(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_attempts_confirmed ON trade_attempts(confirmed, attempted_at DESC);
     """)
     conn.commit()
 
@@ -497,3 +509,42 @@ def update_execution_fill(conn: sqlite3.Connection, exec_id: int, fill_data: dic
         ),
     )
     conn.commit()
+
+
+def log_trade_attempt(conn: sqlite3.Connection, attempt: dict) -> str:
+    """Write a pre-execution idempotency record. Returns attempt_id."""
+    conn.execute(
+        """INSERT OR IGNORE INTO trade_attempts
+           (attempt_id, market_id, pair_type, gap_cents, bet_usdc)
+           VALUES (?, ?, ?, ?, ?)""",
+        (
+            attempt["attempt_id"],
+            attempt["market_id"],
+            attempt.get("pair_type", "cross_platform"),
+            attempt.get("gap_cents"),
+            attempt.get("bet_usdc"),
+        ),
+    )
+    conn.commit()
+    return attempt["attempt_id"]
+
+
+def confirm_trade_attempt(conn: sqlite3.Connection, attempt_id: str, trade_id: int) -> None:
+    """Mark an attempt as confirmed after successful execution."""
+    conn.execute(
+        "UPDATE trade_attempts SET confirmed=1, trade_id=? WHERE attempt_id=?",
+        (trade_id, attempt_id),
+    )
+    conn.commit()
+
+
+def get_unconfirmed_attempts(conn: sqlite3.Connection, max_age_minutes: int = 60) -> list:
+    """Return unconfirmed attempts within the last max_age_minutes."""
+    rows = conn.execute(
+        """SELECT * FROM trade_attempts
+           WHERE confirmed=0
+             AND attempted_at > datetime('now', ?)
+           ORDER BY attempted_at DESC""",
+        (f"-{max_age_minutes} minutes",),
+    ).fetchall()
+    return [dict(r) for r in rows]

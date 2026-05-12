@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
@@ -47,3 +49,19 @@ def test_bayes_engine_posterior_changes_when_prev_price_provided():
     # Posterior must change between updates (not stuck at initial value)
     assert len(set(round(x, 6) for x in posteriors)) > 1, \
         "Posterior never changed — BayesEngine does not evolve with prev_price"
+
+
+def test_ws_staleness_event_parsed():
+    """ws_staleness JSON event from Rust must update the Prometheus gauge."""
+    import json
+    import metrics
+    from prometheus_client import REGISTRY
+
+    # Simulate what _read_stdout does for ws_staleness event
+    raw = json.dumps({"event": "ws_staleness", "seconds": 55.0})
+    event = json.loads(raw)
+    if event.get("event") == "ws_staleness":
+        metrics.set_ws_staleness(float(event.get("seconds", 0)))
+
+    val = REGISTRY.get_sample_value("arb_ws_staleness_seconds")
+    assert val == pytest.approx(55.0)

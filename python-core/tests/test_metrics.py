@@ -35,6 +35,8 @@ def test_inc_gap_detected_increments_counter():
     assert after == before + 1.0
 
 
+import pytest
+
 def test_inc_gap_rejected_with_reason():
     import metrics
     from prometheus_client import REGISTRY
@@ -48,3 +50,27 @@ def test_inc_gap_rejected_with_reason():
         {"reason_category": "ev_fail", "pair_type": "cross_platform"}
     )
     assert after == before + 1.0
+
+
+def test_set_ws_staleness_updates_gauge():
+    import metrics
+    from prometheus_client import REGISTRY
+    metrics.set_ws_staleness(42.5)
+    val = REGISTRY.get_sample_value("arb_ws_staleness_seconds")
+    assert val == pytest.approx(42.5)
+
+
+def test_set_fill_success_rate_updates_gauge():
+    import metrics
+    from prometheus_client import REGISTRY
+    metrics.set_fill_success_rate(0.87)
+    val = REGISTRY.get_sample_value("arb_fill_success_rate")
+    assert val == pytest.approx(0.87)
+
+
+def test_pnl_metric_updates():
+    import metrics
+    from prometheus_client import REGISTRY
+    metrics.set_daily_pnl(12.34)
+    val = REGISTRY.get_sample_value("arb_daily_pnl_usdc")
+    assert val == pytest.approx(12.34)

@@ -14,8 +14,10 @@ KALSHI_API_KEY is only needed for live order placement (DRY_RUN=false).
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Optional
 
@@ -142,6 +144,79 @@ async def fetch_kalshi_markets(session: aiohttp.ClientSession) -> list[dict]:
 
     print(f"  Done — {len(markets)} Kalshi markets total")
     return markets
+
+
+_ABBREVS = {
+    "u.s.": "us", "u.k.": "uk", "u.s.a.": "usa",
+    "pct": "percent", "%": "percent",
+}
+
+
+def normalize_title(title: str) -> str:
+    t = title.lower().strip()
+    for abbr, exp in _ABBREVS.items():
+        t = t.replace(abbr, exp)
+    t = re.sub(r"[^\w\s\-]", "", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def title_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, normalize_title(a), normalize_title(b)).ratio()
+
+
+def _confidence_from_similarity(score: float) -> str:
+    if score > 0.95:
+        return "high"
+    if score > 0.90:
+        return "medium"
+    return "low"
+
+
+def check_pair_active(
+    pair: dict,
+    poly_status: Optional[dict],
+    kalshi_status: Optional[dict],
+) -> bool:
+    """Return False if either market is provably inactive; True otherwise (safe default)."""
+    if poly_status is not None:
+        if poly_status.get("active") is False:
+            return False
+    if kalshi_status is not None:
+        if kalshi_status.get("status") not in ("open", None, ""):
+            return False
+    return True
+
+
+async def _fetch_poly_market_status(session: aiohttp.ClientSession, token_id: str) -> Optional[dict]:
+    try:
+        async with session.get(
+            f"{POLYMARKET_GAMMA_API}/markets",
+            params={"clob_token_ids": token_id},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            markets = data if isinstance(data, list) else data.get("markets", [])
+            return markets[0] if markets else None
+    except Exception:
+        return None
+
+
+async def _fetch_kalshi_market_status(session: aiohttp.ClientSession, ticker: str) -> Optional[dict]:
+    headers = {"Authorization": f"Token {KALSHI_API_KEY}"} if KALSHI_API_KEY else {}
+    try:
+        async with session.get(
+            f"{KALSHI_API}/markets/{ticker}",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            return data.get("market", data)
+    except Exception:
+        return None
 
 
 def _parse_iso(s: str) -> Optional[datetime]:
@@ -383,5 +458,42 @@ async def main():
     print("\nDone. Run: python python-core/main.py")
 
 
+async def invalidate_only():
+    """Re-check all pairs in markets.json against live APIs; remove expired ones."""
+    markets_path = Path(MARKETS_JSON)
+    try:
+        existing = json.loads(markets_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        print("ERROR: markets.json not found or invalid")
+        return
+
+    connector = aiohttp.TCPConnector(ssl=False) if os.getenv("DISABLE_SSL") else None
+    async with aiohttp.ClientSession(
+        connector=connector,
+        trust_env=True,
+        timeout=aiohttp.ClientTimeout(total=None, connect=10, sock_read=15),
+    ) as session:
+        pairs = existing.get("pairs", [])
+        kept = []
+        for pair in pairs:
+            poly_status = await _fetch_poly_market_status(session, pair.get("token_a", ""))
+            kalshi_status = await _fetch_kalshi_market_status(session, pair.get("kalshi_ticker", ""))
+            if check_pair_active(pair, poly_status, kalshi_status):
+                kept.append(pair)
+            else:
+                print(f"  Invalidating: {pair.get('market_id')} "
+                      f"(poly={poly_status and poly_status.get('active')}, "
+                      f"kalshi={kalshi_status and kalshi_status.get('status')})")
+
+    removed = len(pairs) - len(kept)
+    print(f"Invalidation complete: {removed} pairs removed, {len(kept)} kept")
+    existing["pairs"] = kept
+    markets_path.write_text(json.dumps(existing, indent=2))
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys as _sys
+    if "--invalidate-only" in _sys.argv:
+        asyncio.run(invalidate_only())
+    else:
+        asyncio.run(main())

@@ -92,3 +92,83 @@ def test_filter_resolution_mismatches_unknown_pair_passes():
         [pair], {}, {}, max_delta_hours=6
     )
     assert len(kept) == 1, "Pair with missing dates must pass through (no data = no block)"
+
+
+# ── NLP matching (Item 16) ───────────────────────────────────────────────────
+
+from backfill_matches import normalize_title, title_similarity
+
+
+def test_normalize_removes_punctuation_and_lowercases():
+    result = normalize_title("Will the U.S. hit 3% GDP growth in 2026?")
+    assert result == result.lower()
+    assert "u.s." not in result
+    assert "?" not in result
+
+
+def test_normalize_collapses_whitespace():
+    result = normalize_title("  Will  it   rain  ")
+    assert "  " not in result
+    assert result == result.strip()
+
+
+def test_normalize_expands_common_abbreviations():
+    result = normalize_title("U.K. GDP pct change")
+    assert "u.k." not in result
+    assert "pct" not in result
+
+
+def test_title_similarity_identical_titles():
+    score = title_similarity("Will BTC reach 100k in 2026", "Will BTC reach 100k in 2026")
+    assert score == pytest.approx(1.0)
+
+
+def test_title_similarity_high_confidence_threshold():
+    score = title_similarity(
+        "Will Bitcoin exceed 100000 by end of 2026",
+        "Will Bitcoin exceed $100000 by end of 2026",
+    )
+    assert score >= 0.90, f"Expected >= 0.90, got {score:.3f}"
+
+
+def test_title_similarity_unrelated_titles():
+    score = title_similarity(
+        "Will the Fed raise rates in 2026",
+        "Who will win the 2026 World Cup",
+    )
+    assert score < 0.80, f"Unrelated titles should score < 0.80, got {score:.3f}"
+
+
+# ── Pair invalidation (Item 17) ──────────────────────────────────────────────
+
+from backfill_matches import check_pair_active
+
+
+def test_invalidation_removes_expired_pair():
+    pair = _make_pair("KXTEST-EXP")
+    poly_status = {"active": False, "end_date_iso": "2025-01-01T00:00:00Z"}
+    kalshi_status = {"status": "open"}
+    active = check_pair_active(pair, poly_status, kalshi_status)
+    assert active is False, "Pair with inactive Polymarket market must be removed"
+
+
+def test_invalidation_keeps_live_pair():
+    pair = _make_pair("KXTEST-LIVE")
+    poly_status = {"active": True}
+    kalshi_status = {"status": "open"}
+    active = check_pair_active(pair, poly_status, kalshi_status)
+    assert active is True
+
+
+def test_invalidation_removes_closed_kalshi():
+    pair = _make_pair("KXTEST-CLOSED")
+    poly_status = {"active": True}
+    kalshi_status = {"status": "closed"}
+    active = check_pair_active(pair, poly_status, kalshi_status)
+    assert active is False, "Pair with closed Kalshi market must be removed"
+
+
+def test_invalidation_unknown_status_keeps_pair():
+    pair = _make_pair("KXTEST-UNKNOWN")
+    active = check_pair_active(pair, None, None)
+    assert active is True, "Unknown API status must not invalidate pair (safe default)"

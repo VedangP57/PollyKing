@@ -1,6 +1,8 @@
 import logging
 from datetime import datetime, timezone
 
+import tracker as _tracker
+
 log = logging.getLogger(__name__)
 
 
@@ -62,3 +64,14 @@ async def audit_orphan_positions(poly_executor, kalshi_executor, db_conn) -> Non
         db_conn.commit()
     except Exception as e:
         log.warning("Polymarket orphan audit failed (non-fatal): %s", e)
+
+    try:
+        unconfirmed = _tracker.get_unconfirmed_attempts(db_conn, max_age_minutes=60)
+        for row in unconfirmed:
+            log.warning(
+                "UNCONFIRMED TRADE ATTEMPT: attempt_id=%s market_id=%s bet_usdc=%s — "
+                "may indicate a crash between order placement and confirmation",
+                row["attempt_id"], row["market_id"], row["bet_usdc"],
+            )
+    except Exception as e:
+        log.warning("Unconfirmed attempt check failed (non-fatal): %s", e)

@@ -10,7 +10,10 @@ from execution_policy import decide as _policy_decide
 from kalshi_executor import ExecutorError, KalshiExecutor
 from kelly_engine import compute_arb_kelly_size
 from polymarket_executor import PolymarketExecutor
-from tracker import log_emergency_position, log_execution_event, update_execution_fill
+from tracker import (
+    log_emergency_position, log_execution_event, update_execution_fill,
+    log_trade_attempt, confirm_trade_attempt,
+)
 
 log = logging.getLogger(__name__)
 
@@ -151,6 +154,19 @@ class TwoLegExecutor:
         except Exception as e:
             log.warning("Balance check failed (%s) — proceeding anyway", e)
 
+        import uuid
+        _attempt_id = str(uuid.uuid4())
+        try:
+            log_trade_attempt(self._db, {
+                "attempt_id": _attempt_id,
+                "market_id": gap.get("market_id", ""),
+                "pair_type": pair_type,
+                "gap_cents": gap.get("gap_cents"),
+                "bet_usdc": bet_size,
+            })
+        except Exception as _e:
+            log.warning("Failed to log trade attempt (%s) — proceeding", _e)
+
         if pair_type == "internal":
             result = await self._execute_internal(gap, bet_size, price_buffer)
         else:
@@ -170,6 +186,8 @@ class TwoLegExecutor:
                 log_execution_event(self._db, exec_evt)
             except Exception:
                 pass  # telemetry is non-fatal
+            if result is not None:
+                result["_attempt_id"] = _attempt_id
 
         return result
 

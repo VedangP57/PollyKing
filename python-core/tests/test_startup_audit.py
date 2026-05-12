@@ -7,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import tracker
 from tracker import _create_tables, log_gap, log_trade
 from startup_audit import audit_orphan_positions
 
@@ -103,3 +104,28 @@ async def test_api_failure_does_not_crash_startup(db):
 
     # Should not raise
     await audit_orphan_positions(mock_poly, mock_kalshi, db)
+
+
+@pytest.mark.asyncio
+async def test_unconfirmed_attempt_flagged_in_audit(db, caplog):
+    """Unconfirmed trade attempts from the last hour are logged as WARNING."""
+    import logging
+    tracker.log_trade_attempt(db, {
+        "attempt_id": "uuid-orphan-test",
+        "market_id": "mkt-orphan",
+        "pair_type": "cross_platform",
+        "gap_cents": 9.0,
+        "bet_usdc": 30.0,
+    })
+
+    mock_poly = AsyncMock()
+    mock_poly.get_open_positions.return_value = []
+    mock_kalshi = AsyncMock()
+    mock_kalshi.get_open_orders.return_value = []
+
+    with caplog.at_level(logging.WARNING):
+        await audit_orphan_positions(mock_poly, mock_kalshi, db)
+
+    assert any("uuid-orphan-test" in r.message for r in caplog.records), (
+        "WARNING must include attempt_id of unconfirmed attempt"
+    )

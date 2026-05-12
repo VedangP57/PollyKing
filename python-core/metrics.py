@@ -66,6 +66,16 @@ active_opportunities = Gauge(
     ["state"],
 )
 
+ws_staleness = Gauge(
+    "arb_ws_staleness_seconds",
+    "Seconds since last real price event from Polymarket WS",
+)
+
+fill_success_rate = Gauge(
+    "arb_fill_success_rate",
+    "Fraction of fill polls that returned filled in rolling 1h window",
+)
+
 # ---------------------------------------------------------------------------
 # Histograms
 # ---------------------------------------------------------------------------
@@ -147,6 +157,14 @@ def set_open_positions(count: int, dry_run: bool) -> None:
 
 def set_daily_pnl(usdc: float) -> None:
     daily_pnl.set(usdc)
+
+
+def set_ws_staleness(seconds: float) -> None:
+    ws_staleness.set(seconds)
+
+
+def set_fill_success_rate(rate: float) -> None:
+    fill_success_rate.set(rate)
 
 
 def set_daily_exposure(usdc: float) -> None:
