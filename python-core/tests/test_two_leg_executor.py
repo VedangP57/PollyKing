@@ -343,7 +343,7 @@ async def test_urgent_gap_uses_aggressive_price(config, db):
 
     captured_price = []
 
-    async def capture_place_order(token_id, side, amount_usdc, price=0.5, neg_risk=False):
+    async def capture_place_order(token_id, side, amount_usdc, price=0.5, neg_risk=False, poly_liquidity_usdc=float("inf")):
         captured_price.append(price)
         return {"order_id": "poly_u", "status": "matched", "platform": "polymarket",
                 "token_id": token_id, "amount_usdc": amount_usdc}

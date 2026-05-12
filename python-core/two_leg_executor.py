@@ -184,6 +184,7 @@ class TwoLegExecutor:
             amount_usdc=poly_amount,
             price=order_price,
             neg_risk=False,
+            poly_liquidity_usdc=gap.get("poly_liquidity_usdc", float("inf")),
         )
         kalshi_task = self._kalshi.place_order(
             ticker=gap["kalshi_ticker"],

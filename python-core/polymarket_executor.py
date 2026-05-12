@@ -2,7 +2,7 @@ import asyncio
 from typing import Optional
 
 from py_clob_client_v2 import ClobClient, OrderArgs, PartialCreateOrderOptions
-from py_clob_client_v2.clob_types import OrderPayload
+from py_clob_client_v2.clob_types import OrderPayload, OrderType
 from py_clob_client_v2.order_builder.constants import BUY, SELL
 
 from kalshi_executor import ExecutorError
@@ -62,9 +62,10 @@ class PolymarketExecutor:
         price: float,
         amount_usdc: float,
         neg_risk: bool = False,
+        poly_liquidity_usdc: float = float("inf"),
     ) -> dict:
         client = self._get_client()
-        # Convert USDC budget → share count at the limit price
+        # Convert USDC budget -> share count at the limit price
         size = round(amount_usdc / price, 2) if price > 0 else 0.0
         order_args = OrderArgs(
             token_id=token_id,
@@ -73,7 +74,28 @@ class PolymarketExecutor:
             side=BUY,
         )
         options = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk)
-        resp = client.create_and_post_order(order_args, options=options)
+        use_fok = self._config.get("use_fok", True)
+
+        if use_fok:
+            fok_resp = client.create_and_post_order(order_args, options=options, order_type=OrderType.FOK)
+            if isinstance(fok_resp, dict) and fok_resp.get("errorMsg"):
+                raise ExecutorError(f"Polymarket FOK rejected: {fok_resp['errorMsg']}")
+            fok_status = fok_resp.get("status", "") if isinstance(fok_resp, dict) else ""
+            fok_id = fok_resp.get("orderID", "") if isinstance(fok_resp, dict) else ""
+            if fok_id and fok_status not in ("cancelled",):
+                return {
+                    "order_id": fok_id,
+                    "status": fok_status,
+                    "platform": "polymarket",
+                    "token_id": token_id,
+                    "amount_usdc": amount_usdc,
+                }
+            # FOK cancelled — check book depth before GTC fallback
+            min_bet = self._config.get("min_bet_usdc", 10.0)
+            if poly_liquidity_usdc <= min_bet * 2:
+                raise ExecutorError("FOK cancelled, book too thin — not retrying with GTC")
+
+        resp = client.create_and_post_order(order_args, options=options, order_type=OrderType.GTC)
         if isinstance(resp, dict) and resp.get("errorMsg"):
             raise ExecutorError(f"Polymarket order rejected: {resp['errorMsg']}")
         return {
@@ -170,10 +192,11 @@ class PolymarketExecutor:
         amount_usdc: float,
         price: float = 0.5,
         neg_risk: bool = False,
+        poly_liquidity_usdc: float = float("inf"),
     ) -> dict:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, self._place_sync, token_id, price, amount_usdc, neg_risk
+            None, self._place_sync, token_id, price, amount_usdc, neg_risk, poly_liquidity_usdc
         )
 
     async def close_order(

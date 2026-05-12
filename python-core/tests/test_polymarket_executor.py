@@ -90,3 +90,79 @@ async def test_client_uses_correct_v2_auth_method(config):
     # v2 uses create_or_derive_api_key — NOT the old create_or_derive_api_creds
     mock_client.create_or_derive_api_key.assert_called_once()
     mock_client.create_or_derive_api_creds.assert_not_called()
+
+
+def _make_executor(use_fok=True, min_bet=10.0):
+    config = {
+        "polymarket_private_key": "0x" + "a" * 64,
+        "polymarket_wallet_address": "0x" + "b" * 40,
+        "polymarket_signature_type": 0,
+        "use_fok": use_fok,
+        "min_bet_usdc": min_bet,
+    }
+    ex = PolymarketExecutor(config)
+    return ex
+
+
+def test_fok_falls_back_to_gtc_when_cancelled_with_depth():
+    """FOK cancel + adequate liquidity -> GTC retry -> success."""
+    executor = _make_executor(use_fok=True)
+    call_order_types = []
+
+    def fake_create_and_post_order(order_args, options=None, order_type=None):
+        call_order_types.append(order_type)
+        if str(order_type) == "FOK":
+            return {"orderID": "", "status": "cancelled", "errorMsg": None}
+        return {"orderID": "gtc-123", "status": "matched", "errorMsg": None}
+
+    mock_client = MagicMock()
+    mock_client.create_and_post_order.side_effect = fake_create_and_post_order
+    executor._client = mock_client
+
+    result = executor._place_sync(
+        token_id="tok1", price=0.5, amount_usdc=20.0, neg_risk=False,
+        poly_liquidity_usdc=50.0,  # 50 > 10*2=20 -> has depth for GTC
+    )
+    assert result["order_id"] == "gtc-123"
+    types_called = [str(t) for t in call_order_types]
+    assert any("FOK" in t for t in types_called), f"FOK not attempted: {types_called}"
+    assert any("GTC" in t for t in types_called), f"GTC not attempted: {types_called}"
+
+
+def test_fok_thin_book_raises_executor_error():
+    """FOK cancel + thin book -> ExecutorError (no GTC retry)."""
+    executor = _make_executor(use_fok=True)
+
+    def fake_create_and_post_order(order_args, options=None, order_type=None):
+        return {"orderID": "", "status": "cancelled", "errorMsg": None}
+
+    mock_client = MagicMock()
+    mock_client.create_and_post_order.side_effect = fake_create_and_post_order
+    executor._client = mock_client
+
+    with pytest.raises(ExecutorError, match="FOK cancelled, book too thin"):
+        executor._place_sync(
+            token_id="tok1", price=0.5, amount_usdc=20.0, neg_risk=False,
+            poly_liquidity_usdc=15.0,  # 15 < 10*2=20 -> thin book
+        )
+
+
+def test_use_fok_false_skips_fok():
+    """When use_fok=False, only GTC is used."""
+    executor = _make_executor(use_fok=False)
+    call_order_types = []
+
+    def fake_create_and_post_order(order_args, options=None, order_type=None):
+        call_order_types.append(order_type)
+        return {"orderID": "gtc-456", "status": "matched", "errorMsg": None}
+
+    mock_client = MagicMock()
+    mock_client.create_and_post_order.side_effect = fake_create_and_post_order
+    executor._client = mock_client
+
+    result = executor._place_sync(
+        token_id="tok1", price=0.5, amount_usdc=20.0, neg_risk=False,
+    )
+    assert result["order_id"] == "gtc-456"
+    types_called = [str(t) for t in call_order_types]
+    assert not any("FOK" in t for t in types_called), f"FOK should not be called: {types_called}"
