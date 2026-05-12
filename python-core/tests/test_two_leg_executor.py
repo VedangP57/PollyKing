@@ -7,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import tracker
 from tracker import _create_tables
 from two_leg_executor import TwoLegExecutor
 from kalshi_executor import ExecutorError
@@ -510,3 +511,50 @@ async def test_internal_pair_uses_polymarket_for_both_legs(config, db, internal_
 
     assert result is not None
     assert MockPoly.return_value.place_order.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_internal_legb_fill_verified():
+    """For internal pairs, leg_b (also Polymarket) must be fill-polled."""
+    config = {"dry_run": False, "min_bet_usdc": 10.0, "max_bet_usdc": 100.0,
+              "bankroll_usdc": 500.0, "kelly_fraction": 0.25}
+    db = sqlite3.connect(":memory:")
+    tracker.init_db(":memory:")
+
+    poly_fills = []
+
+    class MockPoly:
+        async def place_order(self, token_id, side, amount_usdc, price, neg_risk):
+            return {"order_id": f"ord-{token_id[:4]}", "status": "open"}
+        async def get_order_status(self, order_id):
+            poly_fills.append(order_id)
+            return "matched"
+        async def get_balance(self):
+            return 999.0
+
+    class MockKalshi:
+        pass  # not used for internal pairs
+
+    gap = {
+        "pair_type": "internal",
+        "market_id": "evt::tok1-tok2",
+        "polymarket_token": "tok1",
+        "kalshi_ticker": "tok2",  # token_b stored here for internal
+        "polymarket_price": 0.45,
+        "kalshi_price": 0.45,
+        "gap_cents": 10.0,
+        "confidence": "high",
+        "poly_liquidity_usdc": 200.0,
+        "kalshi_liquidity_usdc": 200.0,
+        "fee_rate": 0.02,
+    }
+    executor = TwoLegExecutor.__new__(TwoLegExecutor)
+    executor._config = config
+    executor._db = db
+    executor._poly = MockPoly()
+    executor._kalshi = MockKalshi()
+
+    await executor._execute_internal(gap, bet_size=20.0, price_buffer=0.0)
+
+    # Both tok1 and tok2 order IDs should have been polled
+    assert len(poly_fills) == 2, f"Expected 2 fill polls (both legs), got {len(poly_fills)}: {poly_fills}"

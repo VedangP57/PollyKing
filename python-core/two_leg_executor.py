@@ -270,10 +270,11 @@ class TwoLegExecutor:
             if poly_id:
                 verify.append(("poly", self._poll_and_cancel("polymarket", poly_id)))
 
-        if b_ok and kalshi_count is not None and not dry_run:
-            kalshi_id = result_b.get("order_id", "")
-            if kalshi_id:
-                verify.append(("kalshi", self._poll_and_cancel("kalshi", kalshi_id)))
+        if b_ok and not dry_run:
+            b_id = result_b.get("order_id", "")
+            if b_id:
+                b_platform = "kalshi" if kalshi_count is not None else "polymarket"
+                verify.append((b_platform, self._poll_and_cancel(b_platform, b_id)))
 
         if verify:
             labels, coros = zip(*verify)
