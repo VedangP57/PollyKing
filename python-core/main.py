@@ -23,7 +23,8 @@ from startup_audit import audit_orphan_positions
 import startup_check
 from circuit_breaker import CircuitBreaker
 
-load_dotenv()
+_REPO_ROOT = Path(__file__).parent.parent
+load_dotenv(_REPO_ROOT / "config" / ".env")
 
 # ---------------------------------------------------------------------------
 # API key requirements:
@@ -52,9 +53,9 @@ CONFIG = {
         if os.getenv("DRY_RUN", "true").lower() != "true"
         else 999_999
     ),
-    "db_path": os.getenv("DB_PATH", "data/trades.db"),
-    "rust_binary": os.getenv("RUST_BINARY", "rust-core/target/release/arb"),
-    "markets_json": os.getenv("MARKETS_JSON", "config/markets.json"),
+    "db_path": str(_REPO_ROOT / os.getenv("DB_PATH", "data/trades.db")),
+    "rust_binary": str(_REPO_ROOT / os.getenv("RUST_BINARY", "rust-core/target/release/arb")),
+    "markets_json": str(_REPO_ROOT / os.getenv("MARKETS_JSON", "config/markets.json")),
     "ev_min_cents": float(os.getenv("EV_MIN_CENTS", "1.0")),
     "ev_taker_fee_rate": float(os.getenv("EV_TAKER_FEE_RATE", "0.02")),
     "ev_slippage_cents": float(os.getenv("EV_SLIPPAGE_CENTS", "0.5")),
