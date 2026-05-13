@@ -3,6 +3,20 @@ import sys
 import time
 from loguru import logger
 import metrics as _metrics
+import socket as _socket
+from pathlib import Path as _Path
+
+_SOCK_PATH = str(_Path(__file__).parent.parent / "data" / "polyking_events.sock")
+
+
+def _notify(token: str) -> None:
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+            s.connect(_SOCK_PATH)
+            s.sendall((token + "\n").encode())
+    except OSError:
+        pass  # Tauri not running — ignore
+
 
 # Rate-limit noisy logs — same gap+reason only printed once per cooldown window
 _skip_last: dict[str, float] = {}
@@ -66,6 +80,7 @@ def gap_detected(gap: dict) -> None:
         f"| Gap: {gap['gap_cents']:.1f}c "
         f"| Conf: {gap.get('confidence', 'medium').upper()}"
     )
+    _notify("gap")
 
 
 def gap_rejected(market_id: str, reason: str) -> None:
@@ -96,6 +111,7 @@ def trade_executed(trade: dict) -> None:
         f"| {trade.get('kalshi_side')} Kalshi ${trade.get('kalshi_amount', 0):.2f} "
         f"| Expected: +${trade.get('expected_profit', 0):.2f}{dry_tag}"
     )
+    _notify("trade")
 
 
 def trade_logged(trade_id: int) -> None:
