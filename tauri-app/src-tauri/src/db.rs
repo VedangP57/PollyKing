@@ -68,6 +68,26 @@ fn open() -> Result<Connection> {
     Ok(conn)
 }
 
+fn has_recent_gap_activity_conn(conn: &Connection) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM gaps WHERE detected_at > datetime('now', '-30 seconds')",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
+pub fn has_recent_gap_activity() -> bool {
+    match open() {
+        Ok(conn) => has_recent_gap_activity_conn(&conn),
+        Err(e) => {
+            eprintln!("[PolyyKing Backend] has_recent_gap_activity: failed to open DB: {e}");
+            false
+        }
+    }
+}
+
 fn today_prefix() -> String {
     let now = Utc::now();
     format!("{:04}-{:02}-{:02}", now.year(), now.month(), now.day())
@@ -290,10 +310,10 @@ fn count_pairs() -> i64 {
     match open() {
         Ok(conn) => conn
             .query_row("SELECT COUNT(*) FROM market_pairs", [], |r| r.get(0))
-            .unwrap_or(80691),
+            .unwrap_or(0),
         Err(e) => {
             eprintln!("[PolyyKing Backend] count_pairs: failed to open DB: {e}");
-            80691
+            0
         }
     }
 }
@@ -403,8 +423,36 @@ pub fn get_calibration_stats(db: &str) -> Result<CalibrationStats> {
         )
         .ok();
 
+    // Brier score: binary win/loss prediction accuracy.
+    // p_hat = 1 if we predicted a win (expected_profit > 0), else 0.
+    // outcome = 1 if we actually won (actual_profit > 0), else 0.
+    // brier = mean((p_hat - outcome)^2) — 0 is perfect, 1 is all-wrong.
+    let brier_rows: Vec<(f64, f64)> = conn
+        .prepare(
+            "SELECT expected_profit, actual_profit FROM trades \
+             WHERE status IN ('profit','loss','resolved','closed') \
+             AND actual_profit IS NOT NULL",
+        )?
+        .query_map([], |row| Ok((row.get::<_, f64>(0)?, row.get::<_, f64>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let brier_score = if brier_rows.is_empty() {
+        None
+    } else {
+        let sum: f64 = brier_rows
+            .iter()
+            .map(|(exp, act)| {
+                let p_hat = if *exp > 0.0 { 1.0_f64 } else { 0.0_f64 };
+                let outcome = if *act > 0.0 { 1.0_f64 } else { 0.0_f64 };
+                (p_hat - outcome).powi(2)
+            })
+            .sum();
+        Some(sum / brier_rows.len() as f64)
+    };
+
     Ok(CalibrationStats {
-        brier_score: None,
+        brier_score,
         ev_error,
         win_rate: Some(win_rate),
         trade_count,
@@ -470,4 +518,49 @@ fn infer_category(market_id: &str) -> String {
         return "macro".to_string();
     }
     "other".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE gaps (
+                id INTEGER PRIMARY KEY,
+                detected_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn test_no_gaps_returns_false() {
+        let conn = make_test_db();
+        assert!(!has_recent_gap_activity_conn(&conn));
+    }
+
+    #[test]
+    fn test_recent_gap_returns_true() {
+        let conn = make_test_db();
+        conn.execute(
+            "INSERT INTO gaps (detected_at) VALUES (datetime('now'))",
+            [],
+        )
+        .unwrap();
+        assert!(has_recent_gap_activity_conn(&conn));
+    }
+
+    #[test]
+    fn test_old_gap_returns_false() {
+        let conn = make_test_db();
+        conn.execute(
+            "INSERT INTO gaps (detected_at) VALUES (datetime('now', '-60 seconds'))",
+            [],
+        )
+        .unwrap();
+        assert!(!has_recent_gap_activity_conn(&conn));
+    }
 }
