@@ -1,9 +1,11 @@
 import asyncio
 import sys
+import time
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
+import requests
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -18,16 +20,20 @@ def config():
         "polymarket_wallet_address": "0x" + "b" * 40,
         "polymarket_signature_type": 0,
         "dry_run": False,
+        "use_fok": True,
+        "min_bet_usdc": 10.0,
     }
 
 
 def make_mock_client(order_id="ord_poly_123", status="matched", error=""):
-    """Build a mock ClobClient matching the v2 SDK interface."""
+    """Build a mock ClobClient matching the official py_clob_client interface."""
     client = MagicMock()
-    # L1 auth — create_or_derive_api_key (v2 method name)
-    client.create_or_derive_api_key.return_value = MagicMock()
-    # v2 unified order method
-    client.create_and_post_order.return_value = {
+    # L1 auth — official client uses create_or_derive_api_creds
+    client.create_or_derive_api_creds.return_value = MagicMock()
+    # Two-step order creation: create_market_order / create_order -> post_order
+    client.create_market_order.return_value = MagicMock()  # signed order object
+    client.create_order.return_value = MagicMock()
+    client.post_order.return_value = {
         "orderID": order_id,
         "status": status,
         "errorMsg": error,
@@ -49,7 +55,7 @@ async def test_place_order_success(config):
     assert result["order_id"] == "ord_poly_123"
     assert result["status"] == "matched"
     assert result["platform"] == "polymarket"
-    mock_client.create_and_post_order.assert_called_once()
+    mock_client.create_market_order.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -67,7 +73,9 @@ async def test_close_order_calls_create_and_post_order(config):
     with patch("polymarket_executor.ClobClient", return_value=mock_client):
         ex = PolymarketExecutor(config)
         await ex.close_order("token_id", 5.0, price=0.65)
-    assert mock_client.create_and_post_order.call_count == 1
+    # close uses create_order + post_order (GTC SELL)
+    mock_client.create_order.assert_called_once()
+    mock_client.post_order.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -76,20 +84,20 @@ async def test_neg_risk_flag_passed_for_internal(config):
     with patch("polymarket_executor.ClobClient", return_value=mock_client):
         ex = PolymarketExecutor(config)
         await ex.place_order("token_id", "BUY", 5.0, price=0.50, neg_risk=True)
-    call_args, call_kwargs = mock_client.create_and_post_order.call_args
-    options = call_args[1] if len(call_args) > 1 else call_kwargs.get("options")
-    assert options.neg_risk is True
+    # FOK path: create_market_order called with options
+    call_args = mock_client.create_market_order.call_args
+    options = call_args[0][1] if call_args[0] and len(call_args[0]) > 1 else call_args[1].get("options")
+    assert options is not None and options.neg_risk is True
 
 
 @pytest.mark.asyncio
-async def test_client_uses_correct_v2_auth_method(config):
+async def test_client_uses_official_auth_method(config):
     mock_client = make_mock_client()
     with patch("polymarket_executor.ClobClient", return_value=mock_client):
         ex = PolymarketExecutor(config)
         await ex.place_order("token_id", "BUY", 5.0, price=0.65)
-    # v2 uses create_or_derive_api_key — NOT the old create_or_derive_api_creds
-    mock_client.create_or_derive_api_key.assert_called_once()
-    mock_client.create_or_derive_api_creds.assert_not_called()
+    # Official client uses create_or_derive_api_creds (not the old create_or_derive_api_key)
+    mock_client.create_or_derive_api_creds.assert_called_once()
 
 
 def _make_executor(use_fok=True, min_bet=10.0):
@@ -107,77 +115,84 @@ def _make_executor(use_fok=True, min_bet=10.0):
 def test_fok_falls_back_to_gtc_when_cancelled_with_depth():
     """FOK cancel + adequate liquidity -> GTC retry -> success."""
     executor = _make_executor(use_fok=True)
-    call_order_types = []
+    mock_client = MagicMock()
+    mock_client.create_market_order.return_value = MagicMock()
+    mock_client.create_order.return_value = MagicMock()
 
-    def fake_create_and_post_order(order_args, options=None, order_type=None):
-        call_order_types.append(order_type)
-        if str(order_type) == "FOK":
+    post_call_count = [0]
+
+    def fake_post_order(order, order_type=None):
+        post_call_count[0] += 1
+        from py_clob_client.clob_types import OrderType
+        if order_type == OrderType.FOK:
             return {"orderID": "", "status": "cancelled", "errorMsg": None}
         return {"orderID": "gtc-123", "status": "matched", "errorMsg": None}
 
-    mock_client = MagicMock()
-    mock_client.create_and_post_order.side_effect = fake_create_and_post_order
+    mock_client.post_order.side_effect = fake_post_order
     executor._client = mock_client
 
     result = executor._place_sync(
         token_id="tok1", price=0.5, amount_usdc=20.0, neg_risk=False,
-        poly_liquidity_usdc=50.0,  # 50 > 10*2=20 -> has depth for GTC
+        poly_liquidity_usdc=50.0,
     )
     assert result["order_id"] == "gtc-123"
-    types_called = [str(t) for t in call_order_types]
-    assert any("FOK" in t for t in types_called), f"FOK not attempted: {types_called}"
-    assert any("GTC" in t for t in types_called), f"GTC not attempted: {types_called}"
+    assert post_call_count[0] == 2  # FOK then GTC
 
 
 def test_fok_thin_book_raises_executor_error():
     """FOK cancel + thin book -> ExecutorError (no GTC retry)."""
     executor = _make_executor(use_fok=True)
-
-    def fake_create_and_post_order(order_args, options=None, order_type=None):
-        return {"orderID": "", "status": "cancelled", "errorMsg": None}
-
     mock_client = MagicMock()
-    mock_client.create_and_post_order.side_effect = fake_create_and_post_order
+    mock_client.create_market_order.return_value = MagicMock()
+    mock_client.post_order.return_value = {"orderID": "", "status": "cancelled", "errorMsg": None}
     executor._client = mock_client
 
     with pytest.raises(ExecutorError, match="FOK cancelled, book too thin"):
         executor._place_sync(
             token_id="tok1", price=0.5, amount_usdc=20.0, neg_risk=False,
-            poly_liquidity_usdc=15.0,  # 15 < 10*2=20 -> thin book
+            poly_liquidity_usdc=15.0,
         )
 
 
 def test_use_fok_false_skips_fok():
-    """When use_fok=False, only GTC is used."""
+    """When use_fok=False, only GTC is used (create_order, not create_market_order)."""
     executor = _make_executor(use_fok=False)
-    call_order_types = []
-
-    def fake_create_and_post_order(order_args, options=None, order_type=None):
-        call_order_types.append(order_type)
-        return {"orderID": "gtc-456", "status": "matched", "errorMsg": None}
-
     mock_client = MagicMock()
-    mock_client.create_and_post_order.side_effect = fake_create_and_post_order
+    mock_client.create_order.return_value = MagicMock()
+    mock_client.post_order.return_value = {"orderID": "gtc-456", "status": "matched", "errorMsg": None}
     executor._client = mock_client
 
-    result = executor._place_sync(
-        token_id="tok1", price=0.5, amount_usdc=20.0, neg_risk=False,
-    )
+    result = executor._place_sync(token_id="tok1", price=0.5, amount_usdc=20.0, neg_risk=False)
     assert result["order_id"] == "gtc-456"
-    types_called = [str(t) for t in call_order_types]
-    assert not any("FOK" in t for t in types_called), f"FOK should not be called: {types_called}"
+    mock_client.create_market_order.assert_not_called()
+
+
+def test_place_sync_retries_on_429():
+    """HTTP 429 from Polymarket -> retry up to 3 times before raising ExecutorError."""
+    executor = _make_executor(use_fok=True)
+    mock_client = MagicMock()
+    mock_client.create_market_order.return_value = MagicMock()
+
+    rate_limit_resp = MagicMock()
+    rate_limit_resp.status_code = 429
+    err = requests.HTTPError(response=rate_limit_resp)
+    mock_client.post_order.side_effect = err
+    executor._client = mock_client
+
+    with patch("polymarket_executor.time.sleep"):
+        with pytest.raises(ExecutorError, match="max retries exhausted"):
+            executor._place_sync("tok1", 0.5, 20.0)
+
+    assert mock_client.create_market_order.call_count == 3
 
 
 # ---------------------------------------------------------------------------
 # Fee cache tests
 # ---------------------------------------------------------------------------
 
-from unittest.mock import AsyncMock
-
 
 @pytest.mark.asyncio
 async def test_fee_cache_populates():
-    """warm_fee_cache stores taker_fee_rate per token_id."""
     config = {
         "polymarket_private_key": "0x" + "a" * 64,
         "polymarket_wallet_address": "0x" + "b" * 40,
@@ -208,19 +223,16 @@ async def test_fee_cache_populates():
 
 @pytest.mark.asyncio
 async def test_fee_cache_miss_defaults():
-    """Token not in API response falls back to 0.02."""
     config = {
         "polymarket_private_key": "0x" + "a" * 64,
         "polymarket_wallet_address": "0x" + "b" * 40,
     }
     executor = PolymarketExecutor(config)
-    # Don't call warm_fee_cache — cache is empty
     assert executor._fee_cache.get("missing-token", 0.02) == 0.02
 
 
 @pytest.mark.asyncio
 async def test_fee_cache_api_error_falls_back():
-    """API error during warm_fee_cache logs warning but does not raise."""
     config = {
         "polymarket_private_key": "0x" + "a" * 64,
         "polymarket_wallet_address": "0x" + "b" * 40,

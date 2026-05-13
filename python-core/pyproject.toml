@@ -8,7 +8,7 @@ dependencies = [
     "loguru>=0.7",
     "pydantic>=2.0",
     "rapidfuzz>=3.0",
-    "py-clob-client-v2>=0.1.0",
+    "py-clob-client>=0.34.6",
     "prometheus-client>=0.20",
 ]
 

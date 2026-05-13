@@ -1,12 +1,20 @@
 import asyncio
 import logging
+import time
 from typing import Optional
 
 import aiohttp
+import requests
 
-from py_clob_client_v2 import ClobClient, OrderArgs, PartialCreateOrderOptions
-from py_clob_client_v2.clob_types import OrderPayload, OrderType
-from py_clob_client_v2.order_builder.constants import BUY, SELL
+from py_clob_client.client import ClobClient
+from py_clob_client.clob_types import (
+    MarketOrderArgs,
+    OpenOrderParams,
+    OrderArgs,
+    OrderType,
+    PartialCreateOrderOptions,
+)
+from py_clob_client.order_builder.constants import BUY, SELL
 
 from kalshi_executor import ExecutorError
 
@@ -17,16 +25,17 @@ log = logging.getLogger(__name__)
 #   1 = POLY_PROXY  (Magic Link / Google login export)
 #   2 = GNOSIS_SAFE (proxy wallet shown on polymarket.com/settings — most browser users)
 _DEFAULT_SIG_TYPE = 0
+_PLACE_MAX_RETRIES = 3
 
 
 class PolymarketExecutor:
-    """Places live orders on Polymarket via py_clob_client_v2.
+    """Places live orders on Polymarket via py_clob_client (official Polymarket package).
 
     Two-phase auth per Polymarket docs:
       Phase 1 (L1): sign with private key → derive API credentials
       Phase 2 (L2): use derived creds for all trading requests
 
-    py_clob_client_v2 is synchronous — orders run in a thread executor so they
+    py_clob_client is synchronous — orders run in a thread executor so they
     don't block the asyncio event loop.
     """
 
@@ -83,7 +92,7 @@ class PolymarketExecutor:
             chain_id=137,
             key=key,
         )
-        creds = l1_client.create_or_derive_api_key()
+        creds = l1_client.create_or_derive_api_creds()
 
         # Phase 2: full client with L2 credentials enabled
         self._client = ClobClient(
@@ -105,19 +114,12 @@ class PolymarketExecutor:
         poly_liquidity_usdc: float = float("inf"),
     ) -> dict:
         client = self._get_client()
-        # Convert USDC budget -> share count at the limit price
         size = round(amount_usdc / price, 2) if price > 0 else 0.0
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=round(price, 4),
-            size=size,
-            side=BUY,
-        )
         options = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk)
         use_fok = self._config.get("use_fok", True)
 
         if use_fok:
-            fok_resp = client.create_and_post_order(order_args, options=options, order_type=OrderType.FOK)
+            fok_resp = self._post_fok_with_retry(client, token_id, price, size, options)
             if isinstance(fok_resp, dict) and fok_resp.get("errorMsg"):
                 raise ExecutorError(f"Polymarket FOK rejected: {fok_resp['errorMsg']}")
             fok_status = fok_resp.get("status", "") if isinstance(fok_resp, dict) else ""
@@ -135,7 +137,13 @@ class PolymarketExecutor:
             if poly_liquidity_usdc <= min_bet * 2:
                 raise ExecutorError("FOK cancelled, book too thin — not retrying with GTC")
 
-        resp = client.create_and_post_order(order_args, options=options, order_type=OrderType.GTC)
+        order_args = OrderArgs(
+            token_id=token_id,
+            price=round(price, 4),
+            size=size,
+            side=BUY,
+        )
+        resp = self._post_gtc_with_retry(client, order_args, options)
         if isinstance(resp, dict) and resp.get("errorMsg"):
             raise ExecutorError(f"Polymarket order rejected: {resp['errorMsg']}")
         return {
@@ -146,6 +154,51 @@ class PolymarketExecutor:
             "amount_usdc": amount_usdc,
         }
 
+    def _post_fok_with_retry(
+        self,
+        client: ClobClient,
+        token_id: str,
+        price: float,
+        size: float,
+        options: PartialCreateOrderOptions,
+    ) -> dict:
+        """Build and post a FOK order, retrying once on HTTP 429."""
+        market_args = MarketOrderArgs(
+            token_id=token_id,
+            amount=size,
+            side=BUY,
+            price=round(price, 4),
+            order_type=OrderType.FOK,
+        )
+        for attempt in range(_PLACE_MAX_RETRIES):
+            try:
+                order = client.create_market_order(market_args, options)
+                return client.post_order(order, OrderType.FOK)
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 429:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+        raise ExecutorError("Polymarket FOK: max retries exhausted after repeated 429s")
+
+    def _post_gtc_with_retry(
+        self,
+        client: ClobClient,
+        order_args: OrderArgs,
+        options: PartialCreateOrderOptions,
+    ) -> dict:
+        """Build and post a GTC order, retrying once on HTTP 429."""
+        for attempt in range(_PLACE_MAX_RETRIES):
+            try:
+                order = client.create_order(order_args, options)
+                return client.post_order(order, OrderType.GTC)
+            except requests.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 429:
+                    time.sleep(2 ** attempt)
+                    continue
+                raise
+        raise ExecutorError("Polymarket GTC: max retries exhausted after repeated 429s")
+
     def _close_sync(
         self,
         token_id: str,
@@ -154,7 +207,6 @@ class PolymarketExecutor:
         neg_risk: bool = False,
     ) -> None:
         client = self._get_client()
-        # Sell back at aggressive price (current price - small buffer)
         sell_price = max(round(price - 0.01, 4), 0.01)
         size = round(amount_usdc / price, 2) if price > 0 else 0.0
         order_args = OrderArgs(
@@ -164,23 +216,18 @@ class PolymarketExecutor:
             side=SELL,
         )
         options = PartialCreateOrderOptions(tick_size="0.01", neg_risk=neg_risk)
-        client.create_and_post_order(order_args, options=options)
+        order = client.create_order(order_args, options)
+        client.post_order(order, OrderType.GTC)
 
     def _get_balance_sync(self) -> float:
-        """Return available USDC balance from Polymarket CLOB API.
-
-        SDK exposes get_balance_allowance() — USDC (collateral) balance is under
-        asset_type=COLLATERAL. Returns the "balance" field in units of USDC (6 decimals
-        on-chain, but the CLOB API normalises to human-readable dollars).
-        """
-        from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
+        """Return available USDC balance from Polymarket CLOB API."""
+        from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
         client = self._get_client()
         resp = client.get_balance_allowance(BalanceAllowanceParams(asset_type=AssetType.COLLATERAL))
         if isinstance(resp, dict):
-            # API returns balance as string of raw uint256 (6 decimal USDC)
             raw = resp.get("balance", "0")
             try:
-                return float(raw) / 1_000_000  # convert from 6-decimal USDC
+                return float(raw) / 1_000_000
             except (TypeError, ValueError):
                 return 0.0
         return 0.0
@@ -190,13 +237,9 @@ class PolymarketExecutor:
         return await loop.run_in_executor(None, self._get_balance_sync)
 
     def _get_positions_sync(self) -> list[dict]:
-        """Return open orders (active positions) from Polymarket CLOB API.
-
-        SDK has no get_positions() — get_open_orders() returns all resting/open orders
-        which is the correct proxy for detecting unclosed positions on restart.
-        """
+        """Return open orders (active positions) from Polymarket CLOB API."""
         client = self._get_client()
-        resp = client.get_open_orders()
+        resp = client.get_orders(OpenOrderParams())
         if isinstance(resp, list):
             return resp
         return []
@@ -215,7 +258,7 @@ class PolymarketExecutor:
 
     def _cancel_order_sync(self, order_id: str) -> None:
         client = self._get_client()
-        client.cancel_order(OrderPayload(orderID=order_id))
+        client.cancel(order_id)
 
     async def get_order_status(self, order_id: str) -> str:
         loop = asyncio.get_event_loop()
