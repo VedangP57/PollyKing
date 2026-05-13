@@ -474,8 +474,20 @@ export default function App() {
 
     onCleanup(() => {
       clearInterval(tickId);
+      clearTimeout(newGapTimer);
+      clearTimeout(flashTimer);
       unlistenGap?.();
       unlistenTrade?.();
+    });
+
+    // Hydrate on startup — populate signals before any live events arrive
+    void invoke<Gap[]>("get_active_gaps").then((r) => {
+      setGaps(r.slice(0, 50));
+      setLastGapUpdate(Date.now());
+    });
+    void invoke<Trade[]>("get_recent_trades").then((r) => {
+      setTrades(r.slice(0, 500));
+      setLastTradeUpdate(Date.now());
     });
 
     void listen<Gap[]>("gap-detected", (e) => {

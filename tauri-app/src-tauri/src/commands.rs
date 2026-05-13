@@ -282,7 +282,6 @@ pub fn get_portfolio_breakdown() -> Result<Vec<db::CategoryBreakdown>, String> {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct ConnectionStatus {
     pub bot_running: bool,
     pub ws_active: bool,
