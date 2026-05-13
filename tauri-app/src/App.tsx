@@ -1,7 +1,9 @@
 import {
   createSignal,
   createEffect,
+  onMount,
   onCleanup,
+  untrack,
   For,
   Show,
   createMemo,
@@ -32,6 +34,7 @@ import {
 import RiskPanel from "./components/RiskPanel";
 import CalibrationPanel from "./components/CalibrationPanel";
 import PortfolioPanel from "./components/PortfolioPanel";
+import GapRow from "./components/GapRow";
 
 interface Stats {
   pairs_count: number;
@@ -61,6 +64,8 @@ interface Trade {
   status: string;
   dry_run: boolean;
 }
+
+interface ConnectionStatus { bot_running: boolean; ws_active: boolean }
 
 interface UiSettings {
   gapPollMs: number;
@@ -92,7 +97,7 @@ function debugLog(message: string, data?: unknown): void {
 }
 
 const DEFAULT_STATS: Stats = {
-  pairs_count: 80691,
+  pairs_count: 0,
   gaps_today: 0,
   trades_today: 0,
   pnl: 0,
@@ -234,26 +239,20 @@ export default function App() {
     refetchOnWindowFocus: false as const,
   });
 
-  const gapsQuery = createQuery(() => ({
+  const statsQuery = createQuery(() => ({
     ...queryBase(),
-    queryKey: ["polyking", "gapsStats"],
-    queryFn: async () => {
-      const [stats, gaps] = await Promise.all([
-        invoke<Stats>("get_stats"),
-        invoke<Gap[]>("get_active_gaps"),
-      ]);
-      return { stats, gaps };
-    },
-    staleTime: poll().gapPollMs,
-    refetchInterval: poll().gapPollMs,
+    queryKey: ["polyking", "stats"],
+    queryFn: () => invoke<Stats>("get_stats"),
+    staleTime: 10_000,
+    refetchInterval: 10_000,
   }));
 
-  const tradesQuery = createQuery(() => ({
+  const connectionQuery = createQuery(() => ({
     ...queryBase(),
-    queryKey: ["polyking", "trades"],
-    queryFn: () => invoke<Trade[]>("get_recent_trades"),
-    staleTime: poll().tradePollMs,
-    refetchInterval: poll().tradePollMs,
+    queryKey: ["polyking", "connection"],
+    queryFn: () => invoke<ConnectionStatus>("get_connection_status"),
+    staleTime: 3_000,
+    refetchInterval: 3_000,
   }));
 
   const modeQuery = createQuery(() => ({
@@ -299,6 +298,62 @@ export default function App() {
 
   const [gapSort, setGapSort] = createSignal<GapSort>({ key: "gap", dir: "desc" });
   const [tradeSort, setTradeSort] = createSignal<TradeSort>({ key: "time", dir: "desc" });
+
+  const [gaps, setGaps] = createSignal<Gap[]>([]);
+  const [trades, setTrades] = createSignal<Trade[]>([]);
+  const [lastGapUpdate, setLastGapUpdate] = createSignal(Date.now());
+  const [lastTradeUpdate, setLastTradeUpdate] = createSignal(Date.now());
+  const [now, setNow] = createSignal(Date.now());
+
+  const [gapFlash, setGapFlash] = createSignal(false);
+  const [newGapIds, setNewGapIds] = createSignal(new Set<string>());
+
+  let newGapTimer: ReturnType<typeof setTimeout> | undefined;
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function triggerGapFlash() {
+    clearTimeout(flashTimer);
+    setGapFlash(true);
+    flashTimer = setTimeout(() => setGapFlash(false), 300);
+  }
+
+  const [displayPnl, setDisplayPnl] = createSignal(0);
+
+  createEffect(() => {
+    const target = stats().pnl;
+    const diff = target - untrack(() => displayPnl());
+    if (Math.abs(diff) < 0.001) return;
+    const step = diff / 20;
+    let i = 0;
+    const id = setInterval(() => {
+      if (i++ >= 20) {
+        clearInterval(id);
+        setDisplayPnl(target);
+        return;
+      }
+      setDisplayPnl((p) => p + step);
+    }, 16);
+    onCleanup(() => clearInterval(id));
+  });
+
+  const pnlCardClass = createMemo(() =>
+    stats().pnl > 0 ? "stat-positive" : stats().pnl < 0 ? "stat-negative" : ""
+  );
+
+  const [tradesPulse, setTradesPulse] = createSignal(false);
+  let prevTrades = -1;
+  createEffect(() => {
+    const count = stats().trades_today;
+    if (prevTrades >= 0 && count > prevTrades) {
+      setTradesPulse(true);
+      const id = setTimeout(() => setTradesPulse(false), 600);
+      onCleanup(() => clearTimeout(id));
+    }
+    prevTrades = count;
+  });
+
+  const connStatus = createMemo(() => connectionQuery.data);
+
   const [showChart, setShowChart] = createSignal(
     localStorage.getItem("pk_show_chart") === "true"
   );
@@ -319,9 +374,7 @@ export default function App() {
     modeQuery.data === "LIVE" ? "LIVE" : "DRY_RUN",
   );
   const running = createMemo(() => botQuery.data ?? false);
-  const stats = createMemo(() => gapsQuery.data?.stats ?? DEFAULT_STATS);
-  const gaps = createMemo(() => gapsQuery.data?.gaps ?? []);
-  const trades = createMemo(() => tradesQuery.data ?? []);
+  const stats = createMemo(() => statsQuery.data ?? DEFAULT_STATS);
 
   const sortedGaps = createMemo(() => sortGaps(gaps(), gapSort()));
   const sortedTrades = createMemo(() => sortTrades(trades(), tradeSort()));
@@ -360,8 +413,8 @@ export default function App() {
   const queryError = createMemo(() => {
     const candidates = [
       settingsQuery.error,
-      gapsQuery.error,
-      tradesQuery.error,
+      statsQuery.error,
+      connectionQuery.error,
       modeQuery.error,
       botQuery.error,
       pnlQuery.error,
@@ -389,8 +442,8 @@ export default function App() {
   const [slowSync, setSlowSync] = createSignal(false);
   createEffect(() => {
     const fetching =
-      gapsQuery.isFetching ||
-      tradesQuery.isFetching ||
+      statsQuery.isFetching ||
+      connectionQuery.isFetching ||
       modeQuery.isFetching ||
       botQuery.isFetching ||
       pnlQuery.isFetching;
@@ -412,6 +465,35 @@ export default function App() {
   createShortcut(["Control", "r"], () => void invalidatePolyking(), { preventDefault: true });
   createShortcut(["Meta", ","], () => openSettings(), { preventDefault: true });
   createShortcut(["Control", ","], () => openSettings(), { preventDefault: true });
+
+  onMount(() => {
+    const tickId = setInterval(() => setNow(Date.now()), 1000);
+
+    let unlistenGap: (() => void) | undefined;
+    let unlistenTrade: (() => void) | undefined;
+
+    onCleanup(() => {
+      clearInterval(tickId);
+      unlistenGap?.();
+      unlistenTrade?.();
+    });
+
+    void listen<Gap[]>("gap-detected", (e) => {
+      setGaps(e.payload.slice(0, 50));
+      setLastGapUpdate(Date.now());
+      triggerGapFlash();
+      const ids = new Set(e.payload.map((g) => g.market_id));
+      setNewGapIds(ids);
+      clearTimeout(newGapTimer);
+      newGapTimer = setTimeout(() => setNewGapIds(new Set<string>()), 3000);
+      void maybeNotifyForGaps(e.payload, poll());
+    }).then((fn) => { unlistenGap = fn; });
+
+    void listen<Trade[]>("trade-executed", (e) => {
+      setTrades(e.payload.slice(0, 500));
+      setLastTradeUpdate(Date.now());
+    }).then((fn) => { unlistenTrade = fn; });
+  });
 
   async function maybeNotifyForGaps(list: Gap[], cfg: UiSettings) {
     const thresh = cfg.notifyGapMinCents;
@@ -438,12 +520,6 @@ export default function App() {
   }
 
   createEffect(() => {
-    const bundle = gapsQuery.data;
-    if (!bundle?.gaps) return;
-    void maybeNotifyForGaps(bundle.gaps, poll());
-  });
-
-  createEffect(() => {
     let unlisten: UnlistenFn | undefined;
     void listen<PolykingMenuPayload>("polyking-action", (ev) => {
       const a = ev.payload.action;
@@ -464,7 +540,7 @@ export default function App() {
       await invoke("start_bot");
       setErrorMsg(null);
       await qc.invalidateQueries({ queryKey: ["polyking", "botRunning"] });
-      await qc.invalidateQueries({ queryKey: ["polyking", "gapsStats"] });
+      await qc.invalidateQueries({ queryKey: ["polyking", "stats"] });
     } catch (e) {
       setErrorMsg(errText(e));
     }
@@ -477,7 +553,7 @@ export default function App() {
       await invoke("stop_bot");
       setErrorMsg(null);
       await qc.invalidateQueries({ queryKey: ["polyking", "botRunning"] });
-      await qc.invalidateQueries({ queryKey: ["polyking", "gapsStats"] });
+      await qc.invalidateQueries({ queryKey: ["polyking", "stats"] });
     } catch (e) {
       setErrorMsg(errText(e));
     }
@@ -619,7 +695,7 @@ export default function App() {
   }
 
   function secsAgo(ts: number): string {
-    const s = Math.floor((Date.now() - ts) / 1000);
+    const s = Math.floor((now() - ts) / 1000);
     if (s < 5) return "just now";
     return s + "s ago";
   }
@@ -696,6 +772,16 @@ export default function App() {
                 ? "bot running"
                 : "bot stopped"}
         </span>
+        <span
+          class={`conn-dot conn-dot-${
+            !connStatus()?.bot_running
+              ? "dead"
+              : connStatus()?.ws_active
+              ? "alive"
+              : "degraded"
+          }`}
+          title="WS connection status"
+        />
 
         <div class="topbar-actions">
           <button
@@ -769,14 +855,14 @@ export default function App() {
           <div class="stat-value yellow">{stats().gaps_today}</div>
           <div class="stat-sub">arbitrage opportunities</div>
         </div>
-        <div class="stat-card">
+        <div class={`stat-card ${tradesPulse() ? "stat-pulse" : ""}`}>
           <div class="stat-label">Trades Executed</div>
           <div class="stat-value">{stats().trades_today}</div>
           <div class="stat-sub">{mode() === "DRY_RUN" ? "simulated" : "live"}</div>
         </div>
-        <div class="stat-card">
+        <div class={`stat-card ${pnlCardClass()}`}>
           <div class="stat-label">{mode() === "DRY_RUN" ? "Simulated P&L" : "Realized P&L"}</div>
-          <div class={`stat-value ${stats().pnl >= 0 ? "green" : ""}`}>{fmtPnl(stats().pnl)}</div>
+          <div class={`stat-value ${stats().pnl >= 0 ? "green" : ""}`}>{fmtPnl(displayPnl())}</div>
           <div class="stat-sub">today</div>
           <Show when={stats().rejected_multi_outcome > 0}>
             <div class="stat-rejected">{stats().rejected_multi_outcome} pairs rejected (multi-outcome)</div>
@@ -807,7 +893,7 @@ export default function App() {
       </Show>
 
       <div class="panel">
-        <div class="panel-header">
+        <div classList={{ "panel-header": true, "panel-flash": gapFlash() }}>
           <span class="panel-title">Gaps Today</span>
           <span class="panel-count">{gaps().length}</span>
           <span class="panel-spacer" />
@@ -815,13 +901,17 @@ export default function App() {
             type="button"
             class="btn btn-ghost panel-tool-btn btn-with-icon"
             aria-label="Refresh gaps"
-            onClick={() => void qc.invalidateQueries({ queryKey: ["polyking", "gapsStats"] })}
+            onClick={async () => {
+              const result = await invoke<Gap[]>("get_active_gaps");
+              setGaps(result.slice(0, 50));
+              setLastGapUpdate(Date.now());
+            }}
           >
             <RefreshCw size={14} strokeWidth={2} />
             Refresh
           </button>
           <span class="panel-refresh">
-            {gapsQuery.dataUpdatedAt ? secsAgo(gapsQuery.dataUpdatedAt) : "—"}
+            {secsAgo(lastGapUpdate())}
           </span>
         </div>
         <div class="table-wrap">
@@ -877,29 +967,12 @@ export default function App() {
               <tbody>
                 <For each={sortedGaps()}>
                   {(g, i) => (
-                    <tr>
-                      <td class="row-num">{i() + 1}</td>
-                      <td>
-                        <button
-                          type="button"
-                          class="market-id market-id-btn"
-                          title="Copy market id"
-                          onClick={() => void copyMarketId(g.market_id)}
-                        >
-                          {g.market_id}
-                        </button>
-                      </td>
-                      <td class="right mono">{fmtPrice(g.token_a_price)}</td>
-                      <td class="right mono">{fmtPrice(g.token_b_price)}</td>
-                      <td class="right">
-                        <span class={`gap-pill ${gapClass(g.gap_cents)}`}>{g.gap_cents.toFixed(1)}¢</span>
-                      </td>
-                      <td class="dim">{g.confidence}</td>
-                      <td class={outcomeClass(g.outcome_count, g.market_id)} title={g.outcome_count > 0 ? `${g.outcome_count} outcomes in this event` : "Outcome count unavailable"}>
-                        {outcomeCell(g.outcome_count, g.market_id)}
-                      </td>
-                      <td class="right mono dim">{fmtTime(g.timestamp)}</td>
-                    </tr>
+                    <GapRow
+                      gap={g}
+                      index={i()}
+                      isNew={newGapIds().has(g.market_id)}
+                      onCopy={(id) => void copyMarketId(id)}
+                    />
                   )}
                 </For>
               </tbody>
@@ -917,13 +990,17 @@ export default function App() {
             type="button"
             class="btn btn-ghost panel-tool-btn btn-with-icon"
             aria-label="Refresh trades"
-            onClick={() => void qc.invalidateQueries({ queryKey: ["polyking", "trades"] })}
+            onClick={async () => {
+              const result = await invoke<Trade[]>("get_recent_trades");
+              setTrades(result.slice(0, 500));
+              setLastTradeUpdate(Date.now());
+            }}
           >
             <RefreshCw size={14} strokeWidth={2} />
             Refresh
           </button>
           <span class="panel-refresh">
-            {tradesQuery.dataUpdatedAt ? secsAgo(tradesQuery.dataUpdatedAt) : "—"}
+            {secsAgo(lastTradeUpdate())}
           </span>
         </div>
         <div class="table-wrap">
