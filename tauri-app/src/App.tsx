@@ -317,6 +317,15 @@ export default function App() {
     flashTimer = setTimeout(() => setGapFlash(false), 300);
   }
 
+  const mode = createMemo(() =>
+    modeQuery.data === "LIVE" ? "LIVE" : "DRY_RUN",
+  );
+  const running = createMemo(() => botQuery.data ?? false);
+  const stats = createMemo(() => statsQuery.data ?? DEFAULT_STATS);
+
+  const sortedGaps = createMemo(() => sortGaps(gaps(), gapSort()));
+  const sortedTrades = createMemo(() => sortTrades(trades(), tradeSort()));
+
   const [displayPnl, setDisplayPnl] = createSignal(0);
 
   createEffect(() => {
@@ -369,15 +378,6 @@ export default function App() {
   createEffect(() => {
     localStorage.setItem("pk_show_analytics", String(showAnalytics()));
   });
-
-  const mode = createMemo(() =>
-    modeQuery.data === "LIVE" ? "LIVE" : "DRY_RUN",
-  );
-  const running = createMemo(() => botQuery.data ?? false);
-  const stats = createMemo(() => statsQuery.data ?? DEFAULT_STATS);
-
-  const sortedGaps = createMemo(() => sortGaps(gaps(), gapSort()));
-  const sortedTrades = createMemo(() => sortTrades(trades(), tradeSort()));
 
   const chartAligned = createMemo((): uPlot.AlignedData => {
     const rows = (pnlQuery.data ?? []) as DailyPnl[];
