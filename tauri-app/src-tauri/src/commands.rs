@@ -280,3 +280,19 @@ pub fn get_calibration_stats() -> Result<db::CalibrationStats, String> {
 pub fn get_portfolio_breakdown() -> Result<Vec<db::CategoryBreakdown>, String> {
     db::get_portfolio_breakdown(&db::db_path()).map_err(|e| e.to_string())
 }
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionStatus {
+    pub bot_running: bool,
+    pub ws_active: bool,
+}
+
+#[tauri::command]
+pub fn get_connection_status(state: State<'_, Mutex<BotState>>) -> Result<ConnectionStatus, String> {
+    let mut s = state.lock().map_err(|e| e.to_string())?;
+    reconcile_bot_child(&mut *s);
+    let bot_running = s.child.is_some();
+    let ws_active = db::has_recent_gap_activity();
+    Ok(ConnectionStatus { bot_running, ws_active })
+}
