@@ -2,6 +2,16 @@
 set -e
 REPO="$(cd "$(dirname "$0")" && pwd)"
 
+# ── 0. --moulti flag or MOULTI=1: launch terminal dashboard instead ──────────
+for _arg in "$@"; do
+  if [ "$_arg" = "--moulti" ]; then
+    exec bash "$REPO/scripts/terminal_ui.sh"
+  fi
+done
+if [ "${MOULTI:-0}" = "1" ]; then
+  exec bash "$REPO/scripts/terminal_ui.sh"
+fi
+
 # ── 1. Copy .env if missing ──────────────────────────────────────────────────
 if [ ! -f "$REPO/config/.env" ]; then
   cp "$REPO/config/.env.example" "$REPO/config/.env"
