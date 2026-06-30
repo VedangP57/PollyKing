@@ -25,7 +25,8 @@
       "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT COUNT\\(*\\) FROM trades WHERE dry_run=0\")",
       "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT COUNT\\(*\\) FROM gaps WHERE executed=1\")",
       "Bash(sqlite3 /Users/sarvadhisolution/Documents/Personal/PolyyKing/data/trades.db \"SELECT AVG\\(gap_cents\\), MIN\\(gap_cents\\), MAX\\(gap_cents\\) FROM gaps LIMIT 1000\")",
-      "Bash(sqlite3 *)"
+      "Bash(sqlite3 *)",
+      "Bash(npx tsc *)"
     ]
   }
 }

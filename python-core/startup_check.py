@@ -52,15 +52,16 @@ async def run_all(config: dict) -> None:
             sys.exit(1)
 
     # Check 3: Kalshi public API reachable
-    kalshi_url = config.get("kalshi_api_url", "https://api.elections.kalshi.com/trade-api/v2")
-    kalshi_ping = kalshi_url.rstrip("/") + "/exchange/status"
-    if not await _ping_url(kalshi_ping):
-        log.critical("STARTUP FAIL: Kalshi API unreachable at %s — check network/VPN", kalshi_ping)
-        sys.exit(1)
+    if not config.get("skip_network_checks", False):
+        kalshi_url = config.get("kalshi_api_url", "https://api.elections.kalshi.com/trade-api/v2")
+        kalshi_ping = kalshi_url.rstrip("/") + "/exchange/status"
+        if not await _ping_url(kalshi_ping):
+            log.critical("STARTUP FAIL: Kalshi API unreachable at %s — check network/VPN", kalshi_ping)
+            sys.exit(1)
 
-    # Check 4: Polymarket CLOB reachable (non-fatal — geo-blocked in some regions)
-    if not await _ping_url(_POLYMARKET_PING_URL):
-        log.warning("STARTUP WARN: Polymarket CLOB unreachable — cross-platform mode will not work")
+        # Check 4: Polymarket CLOB reachable (non-fatal — geo-blocked in some regions)
+        if not await _ping_url(_POLYMARKET_PING_URL):
+            log.warning("STARTUP WARN: Polymarket CLOB unreachable — cross-platform mode will not work")
 
     # Check 5: DB integrity
     if not _check_db_integrity(db_path):

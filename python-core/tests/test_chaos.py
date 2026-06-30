@@ -90,6 +90,7 @@ def test_startup_check_exits_on_corrupted_db(tmp_path):
         config = {{
             "db_path": "{db_path}",
             "dry_run": True,
+            "skip_network_checks": True,
         }}
         asyncio.run(startup_check.run_all(config))
     """)
